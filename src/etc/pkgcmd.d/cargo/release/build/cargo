@@ -9,6 +9,15 @@ mkdir -p "$build" &&
         ./autogen.sh
     fi
 ) &&
-cargo package --allow-dirty &&
+{
+    ## Library crates should not include Cargo.lock (downstream users
+    ## resolve their own dependencies). Binary crates need it for
+    ## reproducibility with `cargo install --locked`.
+    pkg_opts=()
+    if [ -f src/lib.rs ] && [ ! -f src/main.rs ] && ! grep -q '^\[\[bin\]\]' Cargo.toml; then
+        pkg_opts+=(--exclude-lockfile)
+    fi
+    cargo package --allow-dirty "${pkg_opts[@]}"
+} &&
 mv "target/package/${pkg_name}-${pkg_version}.crate" "$build/" &&
 echo "${pkg_name}-${pkg_version}" > "$build/.dist-filename"
