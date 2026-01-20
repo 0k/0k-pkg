@@ -1,0 +1,7 @@
+#!/bin/bash
+
+Wrap -d "Check that install and transpilation succeeds" <<EOF || exit 1
+  npm install &&
+  ./node_modules/.bin/tsc
+EOF
+

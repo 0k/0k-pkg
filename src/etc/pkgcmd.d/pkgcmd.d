@@ -1,0 +1,1 @@
+/home/vaab/dev/sh/0k-pkg/src/etc/pkgcmd.d

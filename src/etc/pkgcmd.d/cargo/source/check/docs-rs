@@ -1,0 +1,33 @@
+## -*- mode: shell-script -*-
+
+Wrap -d "Check docs.rs build compatibility" <<'EOF' || exit 1
+    # Skip binary-only crates (no library target = nothing for docs.rs)
+    if [ ! -f src/lib.rs ] && ! grep -q '^\[lib\]' Cargo.toml 2>/dev/null; then
+        echo "Skipping: binary-only crate (no library target)"
+        exit 0
+    fi
+
+    # Run autogen.sh first if present (to replace %%version%% placeholders)
+    if [ -x ./autogen.sh ]; then
+        ./autogen.sh || exit 1
+    fi
+    if ! type -p cargo-docs-rs >/dev/null 2>&1; then
+        echo "Error: cargo-docs-rs not installed." >&2
+        echo "Install with: cargo install cargo-docs-rs" >&2
+        exit 1
+    fi
+    if ! rustup run nightly cargo --version >/dev/null 2>&1; then
+        echo "Error: nightly toolchain not installed." >&2
+        echo "Install with: rustup toolchain install nightly" >&2
+        exit 1
+    fi
+    # Check for musl target if specified in Cargo.toml
+    if grep -q 'x86_64-unknown-linux-musl' Cargo.toml 2>/dev/null; then
+        if ! rustup +nightly target list --installed | grep -q 'x86_64-unknown-linux-musl'; then
+            echo "Error: x86_64-unknown-linux-musl target not installed for nightly." >&2
+            echo "Install with: rustup target add x86_64-unknown-linux-musl --toolchain nightly" >&2
+            exit 1
+        fi
+    fi
+    cargo +nightly docs-rs
+EOF

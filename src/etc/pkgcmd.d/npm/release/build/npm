@@ -1,0 +1,21 @@
+#!/bin/bash
+
+build="$1"
+
+filename=${pkg_name//@/}
+filename=${filename//\//-}
+cd "$workdir"
+echo "
+.unionfs-fuse
+" >> .npmignore
+mkdir -p "$build" &&
+( 
+  if [ -e ./autogen.sh ]; then 
+      ./autogen.sh
+  fi
+) &&
+npm install &&
+npx tsc &&
+npm pack &&
+mv "$filename-$pkg_version"*".tgz" "$build/" &&
+echo "$filename-$pkg_version" > "$build/.dist-filename"

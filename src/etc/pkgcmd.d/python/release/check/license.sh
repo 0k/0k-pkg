@@ -1,0 +1,1 @@
+../../../common/release/check/license.sh

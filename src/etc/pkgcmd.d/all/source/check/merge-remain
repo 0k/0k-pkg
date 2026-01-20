@@ -1,0 +1,8 @@
+#!/bin/bash
+
+Wrap -d "Check for merge remains" <<EOF || exit 1
+! rgrep "<<<<<" . --exclude-dir .git &&
+! rgrep ">>>>>" . --exclude-dir .git
+
+EOF
+

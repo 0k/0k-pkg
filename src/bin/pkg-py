@@ -1,0 +1,1213 @@
+#!/usr/bin/env bash-shlib
+# -*- mode: shell-script -*-
+
+
+## TODO
+##
+## - support for btrfs snapshots if possible addtionally to clone to tmp ?
+## - upgrade: with external loop to check publishing ? or localy with 'dpkg -i' ?
+## - we could add a check after publish that it appears in the deb index.
+## - in the line of the process release checks, it should probably check also that
+##   the commit was pushed before actually releasing anything.
+## - in the line of the process release checks, it should probably check also that
+##   the tests passes.
+
+include common
+include pretty
+include parse
+
+
+depends unionfs-fuse twine
+
+
+usage="$exname {-h|--help}
+$exname [-c|--committed] [-w|--workdir] [-h|--help] [-p|--publish]
+$exname [-c|--committed] [-w|--workdir] [-h|--help] [-p|--publish]
+
+General purpose options:
+
+    -v|--verbose        Show VM processing
+    -d|--debug          Show a lot of information
+    --no-cache          Prevent any caching
+
+target source selector: (default is '-c HEAD')
+
+    -c|--committed REV   Use commit specified by REV
+    -w|--workdir         Use the state of the current workdir
+    --staged             Use the staged state
+
+multi-target source selector:
+
+    -i|--intermediate    Use each commit since last push.
+    --since REV       Use each commit since given REV.
+
+Options passed to dovis:
+
+    -p|--platform|-V|--target-version|-f|--filter|-t|--test
+
+
+Disable checks:
+
+    --no-tests
+    --no-dist
+    --no-dist-check
+    --no-sanity-check
+    --no-cover
+    --no-profile
+
+Others:
+
+    --coverage-report
+    -b|--bisect
+    -C|--continue-on-error
+    -s|--shell
+    --publish
+
+
+"
+
+publish=
+upgrade=
+no_test=
+coverage_report=
+no_check_dist=
+# no_git_installability=
+# no_installability=
+check_intermediate=(HEAD)
+dovis_args=()
+dovis_args_breaking_cache=()
+previous_args=()
+no_cache=
+export PKG_COVERAGE=1
+export PKG_PROFILE=1
+while [ "$1" ]; do
+    previous_args+=("$1")
+    case "$1" in
+        "--help"|"-h")
+            print_usage
+            exit 0
+        ;;
+
+        --coverage-report)
+            coverage_report=1
+            [ "$no_cover" ] && {
+                die "Conflicting options: you can't use '$1' and ask for no coverage."
+            }
+            no_dist=1
+            ;;
+        --staged)
+            intended_source=staged
+            [ -z "$source" -o "$source" == "$intended_source" ] || {
+                die "Can't use $1 as a previous option already set it to '$source'."
+            }
+            source="$intended_source"
+            ;;
+        -c|--committed)
+            intended_source=commit
+            [ -z "$source" -o "$source" == "$intended_source" ] || {
+                die "Can't use $1 as a previous option already set it to '$source'."
+            }
+            commit_selected="$2"
+            shift
+            source="$intended_source"
+            ;;
+        -w|--workdir)
+            intended_source=workdir
+            [ -z "$source" -o "$source" == "$intended_source" ] || {
+                die "Can't use $1 as a previous option already set it to '$source'."
+            }
+            source="$intended_source"
+            ;;
+        -i|--intermediate)
+            [ "$shell" ] && {
+                die "You can't use '$1' if you asked for a shell. Please be specific source wise."
+            }
+            intended_source=intermediate
+            [ -z "$source" -o "$source" == "$intended_source" ] || {
+                die "Can't use $1 as a previous option already set it to '$source'."
+            }
+            source="$intended_source"
+
+            current_branch=$(git symbolic-ref HEAD 2>/dev/null) || {
+                die "Couldn't get symbolic ref of current repository."
+            }
+            target_branch=$(git for-each-ref --format='%(upstream:short)' "$current_branch") || {
+                die "Couldn't get target ref of branch '$current_branch'."
+            }
+            if [ -z "$target_branch" ]; then
+                die "Couldn't get upstream name of current branch '$current_branch'."
+            fi
+            # echo "RUNNING on all these commit:"
+            # git log --graph "$target_branch".."$current_branch" \
+            # --pretty=tformat:%C\(yellow\ normal\)%h%Creset\ %C\(blue\ normal\)%an%Creset\ %s\ %Cgreen%d%Creset |
+            # sed -r "s/^/ $GRAY|$NORMAL/g"
+            check_intermediate=($(git rev-list --reverse "^$target_branch" "$current_branch")) || exit 1
+            ;;
+        --since)
+            [ "$shell" ] && {
+                die "You can't use '$1' if you asked for a shell. Please be specific source wise."
+            }
+            intended_source=since
+            [ -z "$source" -o "$source" == "$intended_source" ] || {
+                die "Can't use $1 as a previous option already set it to '$source'."
+            }
+            source="$intended_source"
+
+            since_commit="$2"
+            check_intermediate=($(git rev-list --reverse "^$since_commit" "HEAD")) || exit 1
+            shift
+            ;;
+        -b|--bisect)
+            bisect=true
+            ;;
+        --no-cache)
+            no_cache=yes
+            dovis_args+=("$1")
+            ;;
+        -p|--platform|-V|--target-version|-f|--filter|-t|--test)
+            [ "$no_test" -a "$no_dist_check" ] && {
+                die "You can't provide dovis args (like '$1 $2') and select --no-tests and --no-dist-check at the same time."
+            }
+            dovis_args+=("$1" "$2")
+            dovis_args_breaking_cache+=("$1" "$2")
+            shift
+            ;;
+        -C|--continue-on-error)
+            dovis_args+=("$1")
+            ;;
+        -s|--shell)
+            shell=yes
+            [ "$source" == "intermediate" ] && {
+                die "Can't use '$1' in intermediate mode. Please be more specific to identify one source."
+            }
+            dovis_args+=("$1")
+            ;;
+        -v|--verbose)
+            dovis_args+=("$1")
+            ;;
+        -d|--debug)
+            dovis_args+=("$1")
+            ;;
+        --no-tests)
+            ## dovis is used also for dist-checks !
+            # [ "${dovis_args[*]}" ] && {
+            #     die "You can't provide '--no-tests' option and set dovis args (like '${dovis_args[*]}')."
+            # }
+            contains --test-only "${previous_args[@]}" && {
+                die "Conflicting options: you can't use '$1' and --test-only together."
+            }
+            no_test=true
+            ;;
+        --test-only)
+            contains --no-tests "${previous_args[@]}" && {
+                die "Conflicting options: you can't use '$1' and --no-tests together."
+            }
+            no_test=
+            no_dist=true
+            no_dist_check=true
+            no_sanity_check=true
+            ;;
+        --no-dist)
+            [ "$publish" ] && {
+                die "You can't provide '--no-dist' option while having '--publish' mode."
+            }
+            no_dist=true
+            no_dist_check=true
+            export PKG_DIST=
+            ;;
+        --no-dist-check)
+            no_dist_check=true
+            ;;
+        --no-sanity-check)
+            no_sanity_check=true
+            ;;
+        --no-cover)
+            no_cover=true
+            [ "$coverage_report" ] && {
+                die "Conflicting options: you can't use '$1' and ask for coverage reports."
+            }
+            export PKG_COVERAGE=
+            ;;
+        --no-profile)
+            no_profile=true
+            export PKG_PROFILE=
+            ;;
+        # --no-git-installability)
+        #     no_git_installability=true
+        #     ;;
+        # --no-installability)
+        #     no_installability=true
+        #     ;;
+        --publish)
+            [ "$no_dist" ] && {
+                die "You can't provide '--publish' option while having '--no-dist' mode."
+            }
+            publish=true
+            ;;
+        *)
+            err "Unexpected argument '$1'."
+            exit 1
+        ;;
+    esac
+    shift
+done
+
+
+
+##
+# General Variables
+#
+#
+
+
+## autogen.sh needs git anyway
+if [ ! -d .git ]; then
+    die "Should be a git repository. (didn't find '.git' dir)"
+fi
+
+
+settmpdir tmpdir
+settmpdir upperlayer
+settmpdir workdir
+settmpdir build
+
+export tmpdir upperlayer workdir build
+
+dovis_save="$PWD/.dovis"
+mkdir -p "$dovis_save"
+
+
+
+pkg_save="$PWD/.pkg"
+mkdir -p "$pkg_save"
+touch "$pkg_save/passed"
+
+case "${source:-workdir}" in
+    since)
+        # if [ -z "$check_intermediate" ]; then
+        #     echo "${WHITE}last 5 commit:$NORMAL"
+        #     git log -n 5 --graph \
+        #         --pretty=tformat:%C\(yellow\ normal\)%h%Creset\ %C\(blue\ normal\)%an%Creset\ %s\ %Cgreen%d%Creset \
+        #         "^$since_commit" "HEAD" |
+        #         sed -r "s/^/ $GRAY|$NORMAL/g"
+        # fi
+        Wrap -q -- git clone . "$tmpdir/" || exit 1
+        ;;
+    intermediate)
+        branch=$(git symbolic-ref HEAD 2>/dev/null) || {
+            die "Couldn't get symbolic ref of current repository."
+        }
+        branch=${branch#refs/heads/}
+        if [ -z "$check_intermediate" ]; then
+            echo "${WHITE}current branch:$NORMAL $DARKGREEN$branch$NORMAL"
+            echo "${WHITE}last 3 commit:$NORMAL"
+            git log -n 3 --graph \
+                --pretty=tformat:%C\(yellow\ normal\)%h%Creset\ %C\(blue\ normal\)%an%Creset\ %s\ %Cgreen%d%Creset |
+                sed -r "s/^/ $GRAY|$NORMAL/g"
+        fi
+        Wrap -q -- git clone -b "$branch" . "$tmpdir/" || exit 1
+        ;;
+    commit)
+        Wrap -q <<EOF || exit 1
+git clone . "$tmpdir/"
+cd "$tmpdir/"
+git checkout "$commit_selected"
+EOF
+        ;;
+    workdir)
+        Wrap -q -d "Copying to temporary directory $tmpdir" <<EOF || exit 1
+tar c . | (cd "$tmpdir" ; tar xv)
+EOF
+        ;;
+    staged)
+        Wrap -d "Copying to temporary directory $tmpdir" <<EOF || exit 1
+tar c . | (cd "$tmpdir" ; tar xv) &&
+cd "$tmpdir/" &&
+git stash save --keep-index &&
+git clean -f -d -x
+EOF
+        ;;
+    *)
+        echo "Got value '${source:-workdir}' and this should not happen."
+        exit 1
+esac
+
+cd "$tmpdir"
+
+
+if [ "$shell" ]; then
+    dovis "${dovis_args[@]}"
+    exit $?
+fi
+
+
+##
+# Get other variables
+#
+
+# Name of package is deduced from the name of the directory containing sources
+
+set-overlay() {
+    overlay-setup || exit 1
+    trap_add EXIT "overlay-teardown || {
+                        err \"Couldn't remove overlay on '$workdir' properly.\"
+                        exit 101
+                    }"
+
+}
+export -f set-overlay
+
+overlay-setup() {
+    OVERLAY_PREV_CWD="$PWD"
+    ## Must edit /etc/fuse.conf to user_allow_other
+    unionfs-fuse -o cow,allow_root "$upperlayer=RW:$tmpdir=RO" "$workdir"
+    cd "$workdir"
+}
+
+overlay-teardown() {
+    cd "$OVERLAY_PREV_CWD"
+    fusermount -u "$workdir" &&
+    rm -rf "$upperlayer" &&
+    mkdir "$upperlayer"
+}
+
+md5() {
+    md5_compat |  cut -f 1 -d " "
+}
+
+
+variable_get() {
+    [ -r ".package" ] && . ./.package
+
+    pkg_version=$(./autogen.sh --get-version | tr "_" "-")
+    pkg_name=$(./autogen.sh --get-name)
+
+    is_set pkg_name
+
+    is_set pkg_version
+    # echo "${WHITE} Package${NORMAL} $pkg_name $pkg_version"
+
+    # # Making debname
+    dist_filename="$pkg_name-$pkg_version.tar.gz"
+    # echo "  ${WHITE}dist package name:${NORMAL} $dist_filename"
+
+    export pkg_name pkg_version dist_filename
+}
+
+##
+## pkg functions
+##
+
+PKG_CONFIGFILE=~/.config/pkg/main.yml
+pkg.load_config() {
+    if ! [ -f "$PKG_CONFIGFILE" ]; then
+        die "No pkg config file found in '$PKG_CONFIGFILE'."
+    fi
+    PKG_CONFIG="$(cat "$PKG_CONFIGFILE")"
+}
+
+pkg.config() {
+    local value
+    value=$(echo "$PKG_CONFIG" | shyaml "$@") || {
+        die "Config file '$PKG_CONFIGFILE' incomplete or invalid."
+        exit 1
+    }
+    echo "$value"
+}
+
+
+##
+# FUNCTIONS
+#
+#
+
+mk_sdist() {
+    local build="$1"
+
+    cd "$workdir"
+    mkdir -p "$build"
+    echo mv "dist/$pkg_name-$pkg_version.tar.gz" "$build/"
+    python setup.py sdist -v --formats=gztar &&
+        mv "dist/$pkg_name-$pkg_version.tar.gz" "$build/"
+
+}
+export -f mk_sdist
+
+
+mk_wheel() {
+    local build="$1"
+
+    cd "$workdir"
+    mkdir -p "$build"
+    python setup.py bdist_wheel -d dist &&
+        mv "dist/$pkg_name-$pkg_version"*".whl" "$build/"
+
+}
+export -f mk_wheel
+
+
+py_dist_check() {
+    local build="$1" dist
+
+    Section General distribution files checks
+
+    cd "$build"
+    for dist in *; do
+        Wrap -d "check: '$dist' contains LICENSE" <<EOF || exit 1
+          content=\$(if [[ "$dist" == *".whl" ]]; then
+              unzip -l "$dist"
+          elif [[ "$dist" == *".tar.gz" ]]; then
+              tar tvzf "$dist"
+          else
+              echo "Could not list content of '$dist'." >&2
+              exit 1
+          fi)
+          if ! echo "\$content" | grep LICENSE >/dev/null; then
+             echo "Error: No LICENSE file installed." >&2
+             echo "Content of package:"
+             echo "\$content" | sed -url1 's/^/  /g'
+             exit 1
+          fi
+EOF
+        errlvl=$?
+        [ "$errlvl" == 0 ] || exit 1
+    done
+
+}
+
+
+function mk_prepare_build() {
+    local build="$1" dir
+
+    Section Making distribution files
+
+    if [ -x ./autogen.sh -a -e setup.py ]; then
+
+        for type in sdist wheel; do
+            cache_file $cache_prevent_opt "$pkg_save"/builds/$type dir "make package $type" <<EOF || exit 1
+
+        ## $pkg_version $commit_md5 $tree_hash $md5_dovis $md5_targets $no_dist_check $md5_dovis_args
+        set-overlay || exit 1
+        Wrap -d "make package $type" -- mk_$type "\$dir" || exit 1
+EOF
+            ## being paranoid:
+            [ "$dir" -a "$dir" != "/" ] || {
+                die "Variable should be non-empty. Bailing out"
+            }
+            ## YYY check dir non-empty
+            cp -l "$dir/$pkg_name"* "$build/" || exit 1
+        done
+
+    fi
+
+    if [ -x .package ]; then
+        (
+            set-overlay || exit 1
+
+            unset dist_hook
+            variable_get
+            if ! declare -F dist_hook >/dev/null; then
+                exit 0
+            fi
+            dist_hook ## should place some files in $build/$pkg_version
+        )
+
+    fi
+
+    # print_error "Can't recognize the current package, and can't choose a way to distribute it..."
+}
+
+linting() {
+    (
+
+        cd "$workdir"
+        pyfl
+        echo "${RED}RstLint Errors:${NORMAL}"
+        set -o pipefail
+        {
+            find . -type f -name \*.py -exec rstlint-emacs {} \; |
+                grep "." && exit 1 || exit 0
+        } | sed -url1 's/^/${DARKRED}!!$NORMAL /g'
+
+        ## YYYvlab: should read the setup.cfg to make these concat RST checks
+        ## is changelog concatened with README ok ?
+
+        errlvl=$?
+
+    )
+}
+
+stdin_line_with_context() {
+    local number=$1 context=${2:-3} i=0 line color
+
+    jump=
+    if [[ "$number" =~ ^[0-9]+$ ]]; then
+        start="$number"
+        end="$start"
+    elif [[ "$number" =~ ^[0-9]+-[0-9]+$ ]]; then
+        start="${number%%-*}"
+        end="${number##*-}"
+    elif [[ "$number" =~ ^[0-9]+-\>([0-9]+|exit)$ ]]; then
+        start="${number%%-*}"
+        end="${number##*->}"
+        if [[ "$end" == "exit" ]]; then
+            end=$start
+        fi
+        jump=1
+    else
+        die "Invalid argument syntax '$number'. (ie: '123', '123-125', or '123->125')"
+    fi
+
+    final=$((end + context - 1))
+    local size_line_label=${#final}
+    while IFS="\n" read -r line; do
+        ((i++))
+        ((i < start - context)) && continue
+        ((i > end + context)) && break
+        color="$GRAY"
+        char=" "
+        if ((start < end && (i > end || i < start))); then
+            :
+        elif ((i == start)); then
+            if ((jump)); then
+                color="$DARKYELLOW"
+                char="*"
+            else
+                color="$DARKRED"
+            fi
+        elif ((i > start && i < end)); then
+            if ((i > start + context && i < end - context)); then
+                ((!ellipsis)) && printf "$GRAY%$((size_line_label))s    ... <<< $NORMAL" ".."
+                ((ellipsis++))
+                continue
+            else
+                ((ellipsis)) && printf "${GRAY}skipped $ellipsis lines >>> ...$NORMAL\n"
+                ellipsis=0
+            fi
+            if ((!jump)); then
+                color="$DARKRED"
+            fi
+        elif ((i == end)); then
+            if ((jump)); then
+                color="$DARKYELLOW"
+                char=">"
+            else
+                color="$DARKRED"
+            fi
+        fi
+        printf "$color%$((size_line_label))s$NORMAL%s %s\n" "$i" "$char" "$line"
+    done
+}
+
+test_current() {
+
+    if [ -z "$no_sanity_check" ]; then
+
+    Wrap -qd "Check remaining YYY" <<EOF || exit 1
+! rgrep "YYY" . --exclude-dir .git --exclude \*.pyc
+EOF
+    Wrap -qd "Check remaining pdb" <<EOF || exit 1
+! rgrep -E "import\s+i?pdb" . --exclude-dir .git --include \*.py
+EOF
+
+    Wrap -qd "Check remaining merge remains" <<EOF || exit 1
+! rgrep "<<<<<" . --exclude-dir .git &&
+! rgrep ">>>>>" . --exclude-dir .git
+
+EOF
+
+    Wrap -qd "Check license information" <<'EOF' || exit 1
+date=$(git log -n 1 --format=%cd --date=short | cut -f 1 -d "-")
+
+
+error=0
+while IFS=: read file year; do
+    if [ "$year" != "$date" ]; then
+        echo "Error: File $file has a copyright statement with year $year instead of $date." >&2
+        error=1
+    else
+        echo " info: File $file has correct dated license statement with (year $year)."
+    fi
+done < <(egrep -i "^Copyright \(c\) ([0-9]+-)?[0-9]+,? .*$" LICENSE README* --exclude-dir .git |
+    sed -r 's/^(.*):Copyright \(c\) ([0-9]+-)?([0-9]+),? .*$/\1:\3/g')
+exit $error
+
+EOF
+
+    ## Check license begin information
+    Wrap -qd "Check license begin information" <<'EOF' || exit 1
+date=$(git log -n 1 --format=%cd --date=short | cut -f 1 -d "-")
+
+
+error=0
+while IFS=: read file year; do
+    if [ "$year" != "$date" ]; then
+        echo "Error: File $file has a copyright statement with year $year instead of $date." >&2
+        error=1
+    else
+        echo " info: File $file has correct dated license statement with (year $year)."
+    fi
+done < <(egrep -i "^Copyright \(c\) ([0-9]+-)?[0-9]+,? .*$" LICENSE README* --exclude-dir .git |
+    sed -r 's/^(.*):Copyright \(c\) ([0-9]+-)?([0-9]+),? .*$/\1:\3/g')
+exit $error
+
+EOF
+
+    ## Check rst
+
+    (
+        set-overlay || exit 1
+
+        Wrap -d "Checking ReSTructured files" <<EOF || exit 1
+    cd "$workdir"
+    ./autogen.sh  ## Generates the CHANGELOG.rst
+
+    echo "${RED}RstLint Errors:${NORMAL}"
+    set -o pipefail
+    {
+      find . -type f -name \*.rst -exec rstlint-emacs {} \; |
+        grep "." && exit 1 || exit 0
+    } | sed -url1 's/^/${DARKRED}!!$NORMAL /g'
+EOF
+    ) || exit 1
+
+
+    ## Check rst
+
+        Wrap -d "Packaging files shouldn't contain package name" <<'EOF' || exit 1
+    cd "$workdir"
+    name=$(./autogen.sh --get-name)
+    files=()
+    for f in setup.cfg autogen.sh .travis.yml appveyor.yml setup.py; do
+        [ -e "$f" ] || continue
+        files+=("$f")
+    done
+
+    out=()
+    while read-0 file line; do
+        out+=("$file" "$line")
+    done < <(grep -ZH "$name" "${files[@]}" | tr "\n" "\0")
+
+    count_msgs="${#out[@]}"
+    if [ "$count_msgs" != 0 ]; then
+        echo "${RED}Package files should not contain package name '$name':${NORMAL}"
+        ((i=0))
+        while ((i < count_msgs)); do
+            printf "${DARKRED}%s${NORMAL}: %s\n" "${out[$i]}" "${out[$((i+1))]}"
+            ((i+=2))
+        done | sed -url1 's/^/  - /g'
+        false
+    fi
+    true
+EOF
+
+    fi
+
+    if [ -z "$no_test" ]; then
+        if [ -z "$no_cover" ]; then
+            dovis_args+=("--artifact-dir" "$artifact_dir")
+        fi
+        Section "Tests (use ``--no-tests`` to deactivate)"
+        dovis --label "full" --save-dir "$dovis_save" "${dovis_args[@]}" || exit 1
+    fi
+
+    ## check manifest
+
+#     overlay-setup || exit 1
+#     Wrap -d "check manifest" <<EOF
+#     cd "$workdir"
+#     check-manifest
+# EOF
+#     errlvl=$?
+#     overlay-teardown || exit 1
+#     [ "$errlvl" == 0 ] || exit 1
+
+
+
+
+    #     Wrap -d "Check remaining Tabs" <<EOF || exit 1
+# ! rgrep "\t" . --exclude-dir .git
+# EOF
+    if [ -z "$no_test" -a -z "$no_cover" ]; then
+        if ! gen=$(compgen -G "$artifact_dir/*/*/.coverage"); then
+            Elt "No coverage info found."; print_status noop; Feed
+        else
+            (
+                set-overlay || exit 1
+                Wrap -vd "Combining coverage files (use ``--no-cover`` to deactivate)" <<'EOF' || exit 1
+                set -eux
+                echo -e "[paths]\nsource =\n    ." > "$artifact_dir"/coveragerc
+                cat "$artifact_dir"/*/*/cover_path | sort -u | sed -r 's/^/    /g' | sed -r 's/\s*$//g' >> "$artifact_dir"/coveragerc
+                ## Note: for windows combining, there's a bug, and coverage needs
+                ## to be fixed: https://github.com/nedbat/coveragepy/issues/577
+                coverage combine --rcfile="$artifact_dir/coveragerc" "$artifact_dir"/*/*/.coverage \
+                    > coverage-combine.out 2>&1
+EOF
+
+                ## this variable is local and do not mix with global counterpart
+                if ! coverage_report=$(coverage report -i -m --skip-covered); then
+                    err "Coverage report failed:"
+                    echo "$coverage_report" | sed -url1 "s/^/${DARKRED}  !$NORMAL /g" >&2
+                    echo >&2
+                    echo "You should check 'coveragerc':" >&2
+                    cat "$artifact_dir/coveragerc" | sed -url1 "s/^/${DARKGRAY}  !$NORMAL /g" >&2
+                    echo >&2
+                    echo "You should check output of last combine call:" >&2
+                    cat "coverage-combine.out" | sed -url1 "s/^/${DARKGRAY}  !$NORMAL /g" >&2
+                    echo >&2
+                    echo "You should check strings in outputed '.coverage':" >&2
+                    cat ".coverage" | sed -url1 "s/^/${DARKGRAY}  !$NORMAL /g" >&2
+                    echo >&2
+                    tmpdircoverage=$(mktemp -d debug-coverage-XXXXXX -p /tmp) &&
+                        cp -a . "$tmpdircoverage" &&
+                    echo >&2
+                    echo "A copy of current directory is made in $tmpdircoverage" >&2
+                    echo "  Cwd    : $PWD" >&2
+                    echo "  Command: coverage report -i -m --skip-covered" >&2
+                    echo "Artifact dir contains combining files: $artifact_dir" >&2
+                    if [ -d "$artifact_dir" ]; then
+                        echo "  which is confirmed existent, at least when running this."
+                        tmpdirartifact=$(mktemp -d debug-artifact-XXXXXX -p /tmp) &&
+                            cp -a "$artifact_dir/"* "$tmpdirartifact" &&
+                            echo "A copy of artifact directory was made in $tmpdirartifact" >&2
+                    fi
+                    exit 1
+                fi
+                ## Depending if we have branch coverage or not, the field are different:
+
+                ## For record: this is a standard line from ``coverage report -i -m --skip-covered`` (no branch)
+                ## src/kids/vcs/__init__.py     150     18    88%   62, 66, 76-77, 91-93, 96, 186, 227-228, 319-328
+
+                ## For record: this is a standard line from ``coverage report -i -m --skip-covered`` (branch)
+                ## shyaml.py                    158     26     58      9    82%   22-25, 126-129, 365-366
+
+                if [[ "$(echo "$coverage_report")" == *" Branch "* ]]; then
+                    fields="1,6,7"
+                else
+                    fields="1,4,5"
+                fi
+
+                coverage_report=$(echo "$coverage_report" | grep -v "skipped due to complete" |
+                                      tail -n +3 | grep -v ^TOTAL | egrep -v "^-+$" | egrep -v "^\s*$" |
+                                      sed -r 's/\s+/ /g' | cut -f "$fields"- -d " " | sed -r 's/, /;/g')
+
+
+                max_file_label_size=0
+                max_ct_parts_size=0
+
+                # echo "dir: $artifact_dir"
+                # echo "Coverage report:"
+                # echo "'$coverage_report'"
+                # echo "--- source:"
+                # coverage report -i -m --skip-covered
+                # echo "====" $?
+
+                touch "$artifact_dir/coverage_report"
+                if [ "$coverage_report" ]; then
+                    while read file percent parts; do
+                        ct_parts=0
+                        while read-0 part; do
+                            ((ct_parts++))
+                            printf "%s %s\n" "$file" "$part" >> "$artifact_dir/coverage_report"
+                        done < <(echo -n "$parts;" | tr ";" "\0")
+                        if ((max_file_label_size < ${#file})); then
+                            max_file_label_size="${#file}"
+                        fi
+                        if ((max_ct_parts_size < ${#ct_parts})); then
+                            max_ct_parts_size="${#ct_parts}"
+                        fi
+                    done < <(echo "$coverage_report")
+                    Elt "Coverage:"; Feed
+                    while read file percent parts; do
+                        printf "    %-${max_file_label_size}s $DARKYELLOW%5s$NORMAL in $DARKYELLOW%${max_ct_parts_size}s%s$NORMAL uncovered chunk(s)\n" "$file" "$percent" "$(echo -n "$parts;" | tr ";" "\n" | wc -l)"
+                    done < <(echo "$coverage_report")
+                else
+                    Elt "Coverage: ${GREEN}complete${NORMAL}"; Feed || true
+                fi
+            ) || {
+                err Catched some error
+                exit 1
+            }
+        fi
+    fi
+
+    ## Check linting 
+
+    # overlay-setup || exit 1
+    # Elt "Check linting reports"
+    # cd "$workdir"
+    # ./autogen.sh  ## Generates the CHANGELOG.rst
+
+
+    # errlvl=$?
+    # overlay-teardown || exit 1
+    # [ "$errlvl" == 0 ] || exit 1
+
+    true
+}
+
+
+function test_dist_file() {
+    local build="$1"
+
+
+    cache $cache_prevent_opt "$pkg_save"/dist_file_check "dist file check" <<EOF || exit 1
+        ## $commit_md5 $tree_hash $md5_dovis $md5_targets $md5_dovis_args $md5_test_current $no_test
+        py_dist_check "$build"
+EOF
+
+    if [ -z "$no_dist_check" ]; then
+        dovis_options=("--save-dir" "$dovis_save" )
+        for dist in "$build/"*; do
+            dovis_options+=("-D" "$dist")
+        done
+        Section "Dist file checks (use ``--no-dist-check`` to deactivate)"
+        dovis --label "Check dist files." dist_check "${dovis_options[@]}" "${dovis_args[@]}" -f method:dist
+    fi
+}
+
+
+
+function test_dist() {
+    if [ -z "$no_dist_check" ]; then
+        dovis_options=("--save-dir" "$dovis_save" )
+        Section "Dist checks (use ``--no-dist-check`` to deactivate)"
+        dovis --label "Check dist." dist_check "${dovis_options[@]}" "${dovis_args[@]}" -e method:dist
+    fi
+}
+
+
+## XXXVaab : to finish ? checkinstall do not support correctly "conflicts"
+#
+# function mk_debian_pkg_checkinstall () {
+#     is_set pkg_name pkg_vresion deb_version deb_arch
+#     sudo checkinstall --pkgversion "$pkg_version" \
+#                       --pkgname "$pkg_name" \
+#                       --pkgrelease "$deb_version" \
+#                       --pkgarch "$deb_arch" \
+#                       --maintainer "$deb_maintainer"
+# }
+
+
+cache_file() {
+    local code code_hash cmdline cache_dir cached_message file_var
+    prevent=
+    cmdline=()
+    while read-0 arg; do
+        case "$arg" in
+            -p|--prevent) prevent=yes ;;
+            "--")
+                while cmdline+=("$(next-0)"); do :; done
+                break
+                ;;
+            *) cmdline+=("$arg");;
+        esac
+    done < <(cla.normalize "$@")
+    cache_dir="${cmdline[0]}"
+    file_var="${cmdline[1]}"
+    cached_message="${cmdline[2]}"
+
+    code=$(cat -)
+    code_hash=$(echo "$code" | hash_get)
+    export "$file_var"="$cache_dir/$code_hash"
+    ## being paranoid:
+    [ "$code_hash" ] || {
+        die "Empty code hash (dangerous error). Bailing out."
+    }
+    if [ -d "$cache_dir" -a -e "$cache_dir/$code_hash" ]; then
+        if [ "$prevent" ]; then
+            rm -rf "$cache_dir/$code_hash"
+        else
+            Elt "$cached_message"
+            print_info cached
+            print_status noop
+            Feed
+            return 0
+        fi
+    fi
+
+    mkdir -p "$cache_dir/$code_hash"
+    ( eval "$code" )
+    errlvl="$?"
+    if [ "$errlvl" != 0 ]; then
+        rm -rf "$cache_dir/$code_hash"
+        return "$errlvl"
+    fi
+}
+
+
+cache() {
+    local code code_hash cmdline cache_file cached_message
+    prevent=
+    cmdline=()
+    while read-0 arg; do
+        case "$arg" in
+            -p|--prevent) prevent=yes ;;
+            "--")
+                while cmdline+=("$(next-0)"); do :; done
+                break
+                ;;
+            *) cmdline+=("$arg");;
+        esac
+    done < <(cla.normalize "$@")
+    cache_file="${cmdline[0]}"
+    cached_message="${cmdline[1]}"
+
+    code=$(cat -)
+    code_hash=$(echo "$code" | hash_get)
+    if egrep ^"$code_hash"$ "$cache_file" >/dev/null 2>&1; then
+        if [ "$prevent" ]; then
+            sed -ri "/^$code_hash\$/d" "$cache_file"
+        else
+            Elt "$cached_message"
+            print_info cached
+            print_status noop
+            Feed
+            return 0
+        fi
+    fi
+
+    ( eval "$code" ) || return $?
+    echo "$code_hash" >> "$cache_file"
+}
+
+publish() {
+    if [ "$source" == "workdir" ]; then
+        die "Prevented publishing something coming from $source." \
+            "(Please use -c to use what has been committed)"
+    fi
+
+    echo "${WHITE}repository location:${NORMAL} $repos_ssh_target";
+
+    Section "Updating $repos_ssh_host PyPI repository"
+
+    Elt "Sending to repos... "; Feed
+    echo twine upload /tmp/${dist_filename}
+}
+
+
+test_all() {
+    local rev="$1"
+
+    echo " > $WHITE$msg" | cutline "$SIZE_LINE"
+    echo
+
+    variable_get
+    cache_file $cache_prevent_opt "$pkg_save"/tests artifact_dir "full tests" <<EOF || exit 1
+        ## $other_hash $commit_md5 $tree_hash $md5_dovis $md5_targets $md5_dovis_args $md5_test_current $no_test
+        ## $no_cover $description
+        test_current
+EOF
+
+    if [ "$no_dist" ]; then
+        return 0
+    fi
+
+    cache $cache_prevent_opt "$pkg_save"/dist_passed "test for dist" <<EOF || exit 1
+        ## $other_hash $commit_md5 $tree_hash $md5_dovis $md5_targets $no_dist_check $md5_dovis_args
+        ## $description
+
+        test_dist
+EOF
+
+    cache_file $cache_prevent_opt "$pkg_save"/builds build "builds" <<EOF || exit 1
+        ## $pkg_version $other_hash $commit_md5 $tree_hash $md5_dovis $md5_targets $no_dist_check $md5_dovis_args
+        ## $description
+        mk_prepare_build "\$build"
+EOF
+
+        cache $cache_prevent_opt "$pkg_save"/build_passed "test builds" <<EOF || exit 1
+        ## $pkg_version $other_hash $commit_md5 $tree_hash $md5_dovis $md5_targets $no_dist_check $md5_dovis_args
+        ## $description
+        test_dist_file "\$build"
+EOF
+
+}
+
+
+pkg.load_config
+
+md5_dovis=$(cat $(which dovis) | md5)
+md5_py_versions=$(echo "$PY_VERSIONS" | md5)
+Elt Computing targets
+targets="$(echo $(dovis --list-targets "${dovis_args[@]}" | tr " " ","))"
+Feedback || exit 1
+md5_targets=$(echo "$targets" | md5)
+md5_test_current=$(declare -f test_current | md5)
+md5_dovis_args=$(printf "%s\0" "${dovis_args_breaking_cache[@]}" | sort -z | md5)
+
+
+count="${#check_intermediate[@]}"
+max_len_nb="${#count}"
+format="[%${max_len_nb}d/$count]"
+
+i=0
+for rev in "${check_intermediate[@]}"; do
+    ((i++))
+
+    git checkout -q "$rev" >/dev/null || exit 1
+    description=$(git describe HEAD --tag)   ## autogen depends on that
+
+    other_hash=$(while read tag; do git log -n 1 --format="$tag:%ct" $tag ; done < <(git tag) | hash_get)
+    if ! git diff --no-ext-diff --quiet --exit-code; then
+        warn "testing working directory in a dirty state"
+        commit_md5=
+        tree_hash=
+        ## YYYvlab: should add a special package value
+    elif ! git diff --staged --no-ext-diff --quiet --exit-code >/dev/null 2>&1; then
+        warn "testing working directory in a dirty state (staged changes only)"
+        commit_md5=HEAD
+        tree_hash=$(git write-tree)
+    else
+        commit_md5=$(git rev-parse HEAD)
+        tree_hash=$(git show -q --format=%T HEAD)
+    fi
+    cache_prevent_opt=$([ -z "$no_cache" -a "$commit_md5" ] || echo "-p")
+
+    msg=$(printf "$format " "$i"
+        git log -n 1 "$rev" \
+              --pretty=tformat:%C\(yellow\ normal\)%h%Creset\ %C\(blue\ normal\)%an%Creset\ %s )
+    cache_file $cache_prevent_opt "$pkg_save"/artifacts artifacts "$msg" <<EOF || exit 1
+        ## $other_hash $commit_md5 $tree_hash $md5_dovis $md5_targets $md5_dovis_args $md5_test_current
+        ## $no_dist $no_cover $no_dist_check $no_test $description
+
+    test_all "$rev" && {
+      mkdir -p \$artifacts/{build,cover}
+      [ "$no_dist" ] || {
+           [ "\$build" -a -d "\$build" ] || {
+                echo "Assert error: build variable is empty." >&2
+                exit 1
+           }
+
+           cp "\$build"/* "\$artifacts/build" || true
+      }
+      [ "$no_test" -o "$no_cover" ] || ! [ -e ""\$artifact_dir"/coverage_report" ] || \
+          cp "\$artifact_dir"/coverage_report "\$artifacts/cover" || true
+    }
+
+EOF
+    if [ "$coverage_report" ]; then
+        if [ -s "$artifacts/cover/coverage_report" ]; then
+            echo "$artifacts/cover/coverage_report"
+            echo "   - ${WHITE}Coverage report:$NORMAL"
+            prev_file=
+            while read file number; do
+                if [ "$file" != "$prev_file" ]; then
+                    echo
+                    echo "File $WHITE$file$NORMAL:"
+                    prev_file=$file
+                fi
+                echo "    "
+                echo "  $GRAY..$WHITE lines$NORMAL $number:"
+                echo "    "
+                cat "$file" | stdin_line_with_context "$number"
+            done < <(cat "$artifacts/cover/coverage_report") | sed 's/^/  | /g'
+        else
+            echo "   - ${WHITE}Coverage is ${GREEN}complete$NORMAL"
+        fi
+    fi
+done
+
+## Sending to repos
+
+if [ "$publish" ]; then
+
+    ## are we on a tag ?
+    description=$(git describe HEAD --tag)
+    if [[ "$(git tag -l | grep -F "$description")" != "$description" ]]; then
+        die "Release are allowed only on tags (current version: $description)"
+    fi
+    (
+        overlay-setup || exit 1
+        trap_add EXIT "overlay-teardown || {
+            err \"Couldn't remove overlay on '$workdir' properly.\"
+            exit 101
+        }"
+        cd "$workdir"
+        variable_get
+        PYPI_SERVER=${PYPI_SERVER:-pypi}
+        cache $cache_prevent_opt "$pkg_save"/pypi_registered "registering to $PYPI_SERVER" <<EOF || exit 1
+            ## $pkg_name
+            Wrap -d 'python setup.py register -r "$PYPI_SERVER"'
+EOF
+
+        Wrap -d "Sending files on $PYPI_SERVER" <<EOF || exit 1
+    twine upload "$artifacts/build/"* -r "$PYPI_SERVER"
+EOF
+    )
+
+#     (
+#         depends pandoc
+#         overlay-setup || exit 1
+#         trap_add EXIT "overlay-teardown || {
+#             err \"Couldn't remove overlay on '$workdir' properly.\"
+#             exit 101
+#         }"
+#         remote_origin_url=$(git remote get-url origin)
+#         if [[ "$remote_origin_url" == "git@github.com:"* ]]; then
+#             git_hub=${remote_origin_url##*:}
+#             GITHUB_OWNER=${git_hub%%/*}
+#             GITHUB_PROJECT=$(basename "${git_hub##*/}" .git)
+#             GITHUB_TOKEN=$(pkg.config get-value github.token) || {
+#                 die "You must provide a github access token in pkg's config file."
+#             }
+#             export GITHUB_TOKEN
+#             cd "$workdir"
+#             variable_get
+#             Wrap -d "Creating/Updating github release" <<EOF || exit 1
+
+#                 description="\$(set -o pipefail;
+#                     ./autogen.sh --get-release-changes |
+#                         pandoc -f rst -t markdown_github --base-header-level=2)" || exit 1
+
+#                 github-release release \
+#                     --user "$GITHUB_OWNER" \
+#                     --repo "$GITHUB_PROJECT" \
+#                     --tag "$pkg_version" \
+#                     --name "$pkg_version" \
+#                     --description "\$description" \
+#                     --draft \
+#                     $([ "$STATUS" != "stable" ] && "--pre-release") || exit 1
+
+#                 (
+#                     cd "$build"
+#                     for file in "$pkg_version/"*; do
+#                         [ -e "\$file" ] || {
+#                             echo "Error: '\$file' is not a file."
+#                             exit 1
+#                         }
+#                         github-release upload \
+#                             --user "$GITHUB_OWNER" \
+#                             --repo "$GITHUB_PROJECT" \
+#                             --tag "$pkg_version" \
+#                             --name "\$(basename \$file)" \
+#                             --file $file || exit \$?
+#                     done
+#                 )
+
+# EOF
+
+#         fi
+#     )
+
+# /$pkg_version/assets?name=foo.zip'  \
+# -H "Authorization: token TOKEN"
+# --header 'Content-Type: application/zip' --upload-file test.zip -X POST
+
+
+
+#     fi
+
+
+#     curl 'https://api.github.com/repos/owner/my_repo/releases/:id/assets?access_token=acces_token&name=foo.zip' --header 'Content-Type: application/zip' --upload-file test.zip -X POST
+
+else
+    (
+    cd "$build"
+    for file in *; do
+        [ -e " $file" ] || continue
+        mv "$file" "/tmp" &&
+            info "Written '/tmp/$file'."
+    done
+    )
+fi

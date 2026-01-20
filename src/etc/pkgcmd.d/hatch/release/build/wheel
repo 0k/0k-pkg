@@ -1,0 +1,8 @@
+#!/bin/bash
+
+build="$1"
+
+mkdir -p "$build"
+hatch build -t wheel &&
+    mv "dist/${pkg_name//-/_}-$pkg_version"*".whl" "$build/"
+

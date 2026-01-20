@@ -1,0 +1,22 @@
+#!/bin/bash
+
+# cargo publish needs to run from the package directory.
+# We run autogen.sh to substitute version and prepare files.
+# We use --no-verify since the package was already verified during build.
+
+cd "$workdir" || exit 1
+
+if [ -x ./autogen.sh ]; then
+    ./autogen.sh || exit 1
+fi
+
+cargo publish --no-verify --allow-dirty >&2 || exit 1
+
+# Run post-publish hooks if they exist
+if [ -d .package.d/release/post-publish.d ]; then
+    for hook in .package.d/release/post-publish.d/*; do
+        [ -x "$hook" ] || continue
+        echo "Running post-publish hook: $hook" >&2
+        "$hook" || exit 1
+    done
+fi

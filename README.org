@@ -1,0 +1,290 @@
+#+TITLE: 0k-pkg
+#+AUTHOR: Valentin Lab
+#+OPTIONS: toc:2
+
+* Overview
+
+~0k-pkg~ is a shell-based package management and release automation
+toolkit. It provides a unified interface for building, testing, and
+publishing packages across multiple ecosystems (Rust/Cargo,
+Python/Hatch, TypeScript, JavaScript/npm, and shell packages).
+
+The toolkit auto-detects the package type from project files and
+routes commands to the appropriate handler, enabling consistent
+workflows regardless of the underlying technology.
+
+* Features
+
+- Automatic package type detection based on project files
+- Unified command interface across different package ecosystems
+- Safe testing using unionfs-fuse overlays (source remains unmodified)
+- Multiple source selection modes: committed, workdir, staged, intermediate commits
+- Caching of test results and build artifacts
+- Coverage report aggregation
+- Integration with ~dovis~ for cross-platform testing
+- Extensible architecture for adding new package types
+
+* Supported Package Types
+
+| Type     | Detection File        | Build Output      | Registry |
+|----------+-----------------------+-------------------+----------|
+| Cargo    | ~Cargo.toml~          | Rust crate        | crates.io |
+| Hatch    | ~pyproject.toml~ (with hatchling) | wheel, sdist | PyPI |
+| Python   | ~setup.py~            | wheel, sdist      | PyPI |
+| TypeScript | ~tsconfig.json~     | npm package       | npm |
+| JavaScript | ~package.json~      | npm package       | npm |
+| kal-sh   | ~pkg/~ + ~test/test~  | deb package       | - |
+| charm    | ~metadata.yml~        | charm             | - |
+| autogen  | ~autogen.sh~          | tarball           | - |
+
+* Installation
+
+Ensure dependencies are installed:
+
+#+begin_src sh
+# Core dependency
+apt install unionfs-fuse
+
+# For YAML config parsing
+pip install shyaml
+
+# Per-language dependencies
+cargo install toml-cli   # For Cargo/Hatch packages
+apt install jq           # For npm/Hatch packages
+#+end_src
+
+Install ~0k-pkg~ and its dependencies:
+
+#+begin_src sh
+# bash-shlib must be available
+# dovis must be installed for testing
+
+# Clone and add to PATH
+git clone <repository-url> ~/0k-pkg
+export PATH="$PATH:$HOME/0k-pkg/src/bin"
+#+end_src
+
+Create symlinks for the command shortcuts:
+
+#+begin_src sh
+cd ~/0k-pkg/src/bin
+ln -s pkgcmd t
+ln -s pkgcmd p
+ln -s pkgcmd lint
+ln -s pkgcmd stats
+ln -s pkgcmd pkg
+#+end_src
+
+* Usage
+
+** Main Commands
+
+*** ~pkg~ (alias for ~pkg-common~)
+
+The primary release workflow command. Runs sanity checks, tests,
+builds distribution files, validates them, and optionally publishes.
+
+#+begin_src sh
+# Run full release workflow on committed code (default)
+pkg
+
+# Run on working directory state
+pkg -w
+
+# Run on staged changes only
+pkg --staged
+
+# Test all intermediate commits since last push
+pkg -i
+
+# Publish after successful validation
+pkg --publish
+
+# Skip tests (for quick iteration)
+pkg --no-tests
+
+# Skip distribution building
+pkg --no-dist
+#+end_src
+
+*** ~t~ - Run Tests
+
+Runs the test suite for the detected package type.
+
+#+begin_src sh
+# Run all tests
+t
+
+# Pass arguments to the test runner
+t -v   # verbose (if supported by test runner)
+#+end_src
+
+*** ~p~ - Profile Tests
+
+Runs tests in profile mode, producing diffable output.
+
+#+begin_src sh
+p
+#+end_src
+
+*** ~lint~ - Linting
+
+Runs linting checks appropriate for the package type.
+
+#+begin_src sh
+lint
+#+end_src
+
+*** ~stats~ - Statistics
+
+Outputs diffable statistics about the codebase.
+
+#+begin_src sh
+stats
+#+end_src
+
+** Source Selection
+
+The ~pkg~ command supports multiple source selection modes:
+
+| Option          | Description                                    |
+|-----------------+------------------------------------------------|
+| ~-c REV~        | Use specific commit (default: HEAD)            |
+| ~-w~            | Use current working directory state            |
+| ~--staged~      | Use only staged changes                        |
+| ~-i~            | Test each commit since last push               |
+| ~--since REV~   | Test each commit since specified revision      |
+
+** Workflow Options
+
+| Option                | Description                              |
+|-----------------------+------------------------------------------|
+| ~--no-tests~          | Skip test execution                      |
+| ~--no-dist~           | Skip distribution file creation          |
+| ~--no-dist-check~     | Skip distribution file validation        |
+| ~--no-sanity-check~   | Skip pre-release sanity checks           |
+| ~--no-cover~          | Disable coverage collection              |
+| ~--no-cache~          | Prevent caching of results               |
+| ~--publish~           | Publish to package registry after checks |
+| ~-s~                  | Open interactive shell in test environment |
+
+* Configuration
+
+** User Configuration
+
+Global configuration is stored in:
+
+- ~\~/.config/pkg/main.yml~ - Main configuration file (YAML format)
+- ~\~/.pkgcmd.d/~ - User-level command handlers
+
+** Project Configuration
+
+Projects can provide local overrides in:
+
+- ~.pkgcmd.d/~ - Project-specific command handlers
+- ~.package~ - Legacy package configuration (shell script, sourced)
+
+* How It Works
+
+** Package Detection
+
+When a command is invoked, ~pkgcmd~ walks up the directory tree and
+checks each registered package type's ~applies~ function. The first
+matching type handles the command.
+
+Detection priority is based on load order from:
+
+1. ~\~/.pkgcmd.d/*.sh~ and ~\~/.pkgcmd.d/*/cmd.sh~
+2. Project-local ~.pkgcmd.d/~ directories
+
+** Release Workflow (~pkg~)
+
+1. *Source Preparation*: Clone/copy source to temporary directory
+   based on selected source mode
+2. *Sanity Checks*: Run scripts from ~source/check/~ (license,
+   debugger statements, merge markers)
+3. *Tests*: Execute via ~dovis~ across configured platforms
+4. *Coverage*: Aggregate coverage reports if enabled
+5. *Dist Checks*: Run scripts from ~dist/check/~
+6. *Build*: Execute scripts from ~release/build/~ (wheel, sdist, npm
+   pack, etc.)
+7. *Release Checks*: Validate built artifacts via ~release/check/~
+8. *Publish*: If ~--publish~, execute scripts from ~release/publish/~
+
+** Safe Testing with Overlays
+
+~pkg~ uses ~unionfs-fuse~ to create copy-on-write overlays. Tests run
+in an isolated environment where:
+
+- The original source remains untouched
+- Modifications are written to a temporary upper layer
+- Each test run starts from a clean state
+
+Build artifacts are placed in ~/tmp~ by default.
+
+* Dependencies
+
+** Required
+
+- ~bash-shlib~ - Shell library framework
+- ~unionfs-fuse~ - Filesystem overlay support
+- ~dovis~ - Cross-platform test runner
+
+** Per-Language
+
+| Language   | Dependencies                    |
+|------------+---------------------------------|
+| Cargo/Rust | ~toml-cli~                      |
+| Hatch      | ~toml-cli~, ~jq~, ~hatch~       |
+| Python     | ~nosetests~ (if configured)     |
+| npm/TS     | ~jq~, ~npm~                     |
+
+* Extending
+
+To add support for a new package type, create a handler in
+~\~/.pkgcmd.d/<type>/cmd.sh~ or ~\~/.pkgcmd.d/<type>.sh~:
+
+#+begin_src sh
+# Detection function - return 0 if this type applies
+pkgcmd:<type>:applies() {
+    [ -e "marker-file" ]
+}
+
+# Optional: mark as base type for inheritance
+pkgcmd:<type>:is_base() {
+    [ -e "marker-file" ]
+}
+
+# Command implementations
+pkgcmd:t:<type>:run() {
+    # Run tests
+    your-test-command "$@"
+}
+
+pkgcmd:p:<type>:run() {
+    # Profile tests
+    your-test-command --profile "$@"
+}
+
+pkgcmd:pkg-name:<type>:run() {
+    # Output package name
+    echo "my-package"
+}
+
+pkgcmd:pkg-version:<type>:run() {
+    # Output package version
+    echo "1.0.0"
+}
+#+end_src
+
+For release workflow integration, create executable scripts in:
+
+- ~<type>/source/check/~ - Pre-test sanity checks
+- ~<type>/dist/check/~ - Distribution validation
+- ~<type>/release/build/~ - Build distribution files
+- ~<type>/release/check/~ - Post-build validation
+- ~<type>/release/publish/~ - Publishing commands
+
+* License
+
+See LICENSE file for details.

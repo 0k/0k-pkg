@@ -1,0 +1,20 @@
+## -*- mode: shell-script -*-
+
+(
+   set-overlay || exit 1
+
+Wrap -d "Checking ReSTructured files" <<EOF || exit 1
+cd "$workdir"
+./autogen.sh  ## Generates the CHANGELOG.rst
+
+echo "${RED}RstLint Errors:${NORMAL}"
+set -o pipefail
+{
+find . -type f -name \*.rst -exec rstlint-emacs {} \; |
+grep "." && exit 1 || exit 0
+} | sed -url1 's/^/${DARKRED}!!$NORMAL /g'
+EOF
+) || exit 1
+
+
+

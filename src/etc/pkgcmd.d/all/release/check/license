@@ -1,0 +1,20 @@
+## -*- mode: shell-script -*-
+
+Wrap -d "check: '$dist' contains LICENSE" <<EOF || exit 1
+    content=\$(if [[ "$dist" == *".whl" ]]; then
+        unzip -l "$dist"
+    elif [[ "$dist" == *".tar.gz" ]] || [[ "$dist" == *".tgz" ]] || [[ "$dist" == *".crate" ]]; then
+        tar tvzf "$dist"
+    else
+        echo "Could not list content of '$dist'." >&2
+        exit 1
+    fi)
+    if ! echo "\$content" | grep LICENSE >/dev/null; then
+       echo "Error: No LICENSE file installed." >&2
+       echo "Content of package:"
+       echo "\$content" | sed -url1 's/^/  /g'
+       exit 1
+    fi
+EOF
+
+

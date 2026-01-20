@@ -1,0 +1,7 @@
+## -*- mode: shell-script -*-
+
+
+Wrap -d "Check left-over 'debugger' statements" <<EOF || exit 1
+! rgrep "debugger" . --exclude-dir .git --include='*.ts' --include='*.js'
+EOF
+

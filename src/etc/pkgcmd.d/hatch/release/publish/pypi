@@ -1,0 +1,7 @@
+#!/bin/bash
+
+
+for pack in "$artifacts/build/"* ; do
+    hatch publish "$pack"
+done
+

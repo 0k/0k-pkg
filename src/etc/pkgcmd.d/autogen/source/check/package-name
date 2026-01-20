@@ -1,0 +1,29 @@
+## -*- mode: shell-script -*-
+
+Wrap -d "Packaging files shouldn't contain package name" <<'EOF' || exit 1
+    cd "$workdir"
+    name=$(./autogen.sh --get-name)
+    files=()
+    for f in setup.cfg autogen.sh .travis.yml appveyor.yml setup.py; do
+        [ -e "$f" ] || continue
+        files+=("$f")
+    done
+
+    out=()
+    while read-0 file line; do
+        out+=("$file" "$line")
+    done < <(grep -ZH "$name" "${files[@]}" | tr "\n" "\0")
+
+    count_msgs="${#out[@]}"
+    if [ "$count_msgs" != 0 ]; then
+        echo "${RED}Package files should not contain package name '$name':${NORMAL}"
+        ((i=0))
+        while ((i < count_msgs)); do
+            printf "${DARKRED}%s${NORMAL}: %s\n" "${out[$i]}" "${out[$((i+1))]}"
+            ((i+=2))
+        done | sed -url1 's/^/  - /g'
+        false
+    fi
+    true
+EOF
+

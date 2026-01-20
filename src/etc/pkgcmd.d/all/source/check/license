@@ -1,0 +1,24 @@
+#!/bin/bash
+
+Wrap -d "Has a license" <<'EOF' || exit 1
+ [ -e LICENSE -o -e COPYING ]
+EOF
+
+
+Wrap -d "Check license information" <<'EOF' || exit 1
+date=$(git log -n 1 --format=%cd --date=short | cut -f 1 -d "-")
+
+
+error=0
+while IFS=: read file year; do
+    if [ "$year" != "$date" ]; then
+        echo "Error: File $file has a copyright statement with year $year instead of $date." >&2
+        error=1
+    else
+        echo " info: File $file has correct dated license statement with (year $year)."
+    fi
+done < <(egrep -i "^Copyright \(c\) ([0-9]+-)?[0-9]+,? .*$" LICENSE README* --exclude-dir .git |
+    sed -r 's/^(.*):Copyright \(c\) ([0-9]+-)?([0-9]+),? .*$/\1:\3/g')
+exit $error
+
+EOF

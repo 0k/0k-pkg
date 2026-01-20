@@ -1,0 +1,7 @@
+## -*- mode: shell-script -*-
+
+
+Wrap -d "Check remaining YYY" <<EOF || exit 1
+! rgrep "YYY" . --exclude-dir .git --exclude \*.pyc
+EOF
+

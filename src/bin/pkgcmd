@@ -1,0 +1,183 @@
+#!/usr/bin/bash-shlib
+# -*- mode: shell-script -*-
+
+
+CONFIG_PATH=~/.pkgcmd.d
+
+[[ "${BASH_SOURCE[0]}" != "${0}" ]] && SOURCED=true
+
+[ "$SOURCED" ] && . /etc/shlib
+
+## XXXvlab: could use decorators to postpone loading.
+include color
+include common
+include fn
+include parse
+
+
+pkg.load() {
+    local script path="$PWD" loaded
+    declare -A loaded
+    for script in "$CONFIG_PATH/"*.sh "$CONFIG_PATH/"*"/cmd.sh"; do
+        [ -f "$script" ] || continue
+        script="$(readlink -f "$script")" || continue
+        debug "loading '$script'."
+        . "$script" || {
+            err "Couldn't load '$script'."
+            return 1
+        }
+        loaded["$(readlink -f "$script")"]=1
+    done
+    while [[ "$path" != "" ]]; do
+        if [ -d "$path/.pkgcmd.d" ]; then
+            for script in "$path/.pkgcmd.d/"*.sh "$path/.pkgcmd.d/"*"/cmd.sh"; do
+                [ -f "$script" ] || continue
+                script="$(readlink -f "$script")" || continue
+                [ "${loaded[$script]}" == 1 ] && continue
+                debug "loading '$script'."
+                . "$script" || {
+                    err "Couldn't load '$script'."
+                    return 1
+                }
+                loaded["$script"]=1
+            done
+        fi
+        path="${path%/*}"
+    done
+}
+
+
+pkg.has_cmd() {
+    local cmd_name="$1"
+    [[ $'\n'"$(pkg.list_cmd)"$'\n' == *$'\n'"$cmd_name"$'\n'* ]]
+}
+
+
+pkg.list_cmd() {
+    local cmds
+    ## could be cached
+    declare -A cmds=()
+    while read-0 cmd alternative; do
+        [ "${cmds[$cmd]}" == 1 ] && continue
+        echo $cmd
+        cmds[$cmd]=1
+    done < <(pkg._list_cmd_alternatives)
+}
+
+pkg._list_supported() {
+    ## could be cached
+    declare -F | egrep '^declare -fx? pkgcmd:[^:]+:is_base$' |
+        cut -f 2 -d ":"
+}
+
+pkg._list_applies() {
+    ## could be cached
+    declare -F | egrep '^declare -fx? pkgcmd:[^:]+:applies$' |
+        cut -f 2 -d ":"
+}
+
+pkg._list_pkg_alternatives() {
+    local candidate found=
+    while read-0a candidate; do
+        "pkgcmd:$candidate:applies" && {
+            echo "$candidate"
+            found=1
+        }
+    done < <(pkg._list_applies)
+    [ -n "$found" ]
+}
+
+pkg._list_scripts() {
+    local path="$1"
+    scripts=(.package.d/"$path"/*)
+    # echo alternatives: $PKGCMD_ALTERNATIVES >&2
+    for alternative in $PKGCMD_ALTERNATIVES; do
+        scripts+=("$CONFIG_PATH"/"$alternative"/"$path"/*)
+    done
+    # echo looking at: "${scripts[@]}" >&2
+    for script in "${scripts[@]}"; do
+        [ -f "$script" ] || continue
+        [ -x "$script" ] || continue
+        p0 "$script"
+    done
+}
+
+pkg._list_cmd_alternatives() {
+    ## could be cached
+    declare -F | egrep '^declare -fx? pkgcmd:[^:]+:[^:]+:run$' |
+        cut -f 3 -d " " | cut -f 2-3 -d ":" | tr ":\n" "\0"
+}
+
+pkg.cmd_list_alternatives() {
+    local cmd_name="$1" alternative cmd
+    while read-0 cmd alternative; do
+        [ "$cmd" != "$cmd_name" ] && continue
+        echo "$alternative"
+    done < <(pkg._list_cmd_alternatives)
+}
+
+pkg.alternative_applies() {
+    local alt="$1"
+    if ! fn.exists "pkgcmd:$alt:applies"; then
+        debug "Alternative '$alt' don't provide an 'applies' method." >&2
+        return 1
+    fi
+    "pkgcmd:$alt:applies"
+}
+
+pkg.cmd_alternative_run() {
+    local cmd="$1" alt="$2"
+    shift 2
+    if ! fn.exists pkgcmd:$cmd:$alt:run; then
+        die "Package alternative '$alt' for command '$cmd' exists, but don't provide a 'run' method."
+    fi
+    pkgcmd:$cmd:$alt:run "$@"
+}
+
+pkg.find_applying_alternatives() {
+    local alternative applies_alternative
+    applies_alternative=($(pkg._list_pkg_alternatives))
+    for alternative in $(pkg.cmd_list_alternatives "$cmd"); do
+        [[ " ${applies_alternative[*]} " == *" $alternative "* ]] || continue
+        if pkg.alternative_applies "$alternative"; then
+            echo "$alternative"
+            return 0
+        fi
+    done
+    return 1
+}
+
+pkg.run() {
+    local cmd="$1" found_alternative path
+    shift
+    if ! pkg.has_cmd "$cmd"; then
+        die "No package command '$cmd' found."
+    fi
+    path=
+    found_alternative=
+    while [ "$PWD" != / ]; do
+        found_alternative=$(pkg.find_applying_alternatives) && break
+        cd ..
+    done
+    if [ "$found_alternative" ]; then
+        pkg.cmd_alternative_run "$cmd" "$found_alternative" "$@"
+    else
+        die "No alternative found for package command '$cmd'."
+    fi
+}
+
+[ "$SOURCED" ] && return 0
+
+
+##
+## code
+##
+
+if ! [[ -L "$0" ]]; then
+    echo "Link this executable to any command you'd like to enable." >&2
+    echo "Write new commands in $CONFIG_PATH/*.sh" >&2
+    exit 1
+fi
+
+pkg.load
+pkg.run "${0##*/}" "$@"

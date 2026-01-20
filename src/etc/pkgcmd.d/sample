@@ -1,0 +1,33 @@
+# -*- mode: shell-script -*-
+
+## performance tip:
+## use builtins, as 'c' command is bash-written and will be greatful
+## if you would NOT spawn process. And please return as soon as you
+## know it is NOT a recognised package.
+
+## return errlvl 1 -- is not this package, subdir may contain other packages
+pkgcmd:myname:is_base() {
+    [ -d pkg ] || return 1
+    [ -x test/test -o -x bin/test ] || return 1
+}
+
+
+
+## ``t`` command -- runs all tests, fails at first failure by default
+pkgcmd:t:myname:run() {
+    echo "Not implemented yet"
+}
+
+
+## ``p`` command -- runs all tests in profile mode, fails at first
+## failure, produce diffable content.
+pkgcmd:p:myname:run() {
+    echo "Not implemented yet"
+}
+
+
+## ``pkg`` command -- make a one-file package of the current workdir
+## state
+pkgcmd:pkg:myname:run() {
+    echo "Not implemented yet"
+}

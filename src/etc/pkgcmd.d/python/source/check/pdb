@@ -1,0 +1,5 @@
+## -*- mode: shell-script -*-
+
+Wrap -qd "Check remaining pdb" <<EOF || exit 1
+! rgrep -E "import\s+i?pdb" . --exclude-dir .git --include \*.py
+EOF

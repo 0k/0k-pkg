@@ -1,0 +1,14 @@
+#!/bin/bash
+
+build="$1"
+
+cd "$workdir"
+mkdir -p "$build" &&
+(
+    if [ -x ./autogen.sh ]; then
+        ./autogen.sh
+    fi
+) &&
+cargo package --allow-dirty &&
+mv "target/package/${pkg_name}-${pkg_version}.crate" "$build/" &&
+echo "${pkg_name}-${pkg_version}" > "$build/.dist-filename"

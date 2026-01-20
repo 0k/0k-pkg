@@ -1,0 +1,6 @@
+#!/bin/bash
+
+
+for pack in "$artifacts/build/"* ; do
+    npm publish --access public "$pack"
+done
