@@ -34,10 +34,12 @@ pkgcmd:pkg:all:run() {
 # }
 
 
-## ``lint`` command -- runs linting stats, output diffable content
-# pkgcmd:lint:all:run() {
-#     [ -e setup.cfg ] &&  egrep '^[flake8]' setup.cfg >/dev/null 2>&1 && {
-#           flake8
-#     }
-# }
+## ``lint`` command -- runs lint checks from lint/ directory
+pkgcmd:lint:all:run() {
+    local script
+    while read-0 script; do
+        echo "${script##*/}..."
+        "$script" "$@" || return 1
+    done < <(pkg._list_scripts lint | sort -z)
+}
 

@@ -1,0 +1,4 @@
+#!/bin/bash
+## Run cargo clippy with strict settings
+
+exec cargo clippy --all-targets --all-features -- -D warnings "$@"

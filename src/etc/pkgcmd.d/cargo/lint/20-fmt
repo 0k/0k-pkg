@@ -1,0 +1,4 @@
+#!/bin/bash
+## Check code formatting
+
+exec cargo fmt --check "$@"

@@ -1,0 +1,4 @@
+#!/bin/bash
+## Check documentation warnings
+
+exec cargo doc --no-deps "$@"

@@ -1,0 +1,10 @@
+#!/bin/bash
+## Check org files with pandoc
+
+shopt -s nullglob
+org_files=(*.org)
+[ ${#org_files[@]} -eq 0 ] && exit 0
+
+for f in "${org_files[@]}"; do
+    pandoc --fail-if-warnings -f org -t commonmark "$f" >/dev/null || exit 1
+done
