@@ -1,0 +1,25 @@
+## -*- mode: shell-script -*-
+
+Wrap -d "check: '$dist' has no dev-only dotfiles" <<EOF || exit 1
+    content=\$(if [[ "$dist" == *".whl" ]]; then
+        unzip -l "$dist"
+    elif [[ "$dist" == *".tar.gz" ]] || [[ "$dist" == *".tgz" ]] || [[ "$dist" == *".crate" ]]; then
+        tar tvzf "$dist"
+    else
+        echo "Could not list content of '$dist'." >&2
+        exit 1
+    fi)
+    found=()
+    for pattern in .gitignore .gitchangelog.rc .editorconfig; do
+        if echo "\$content" | grep -q "[/ ]\$pattern\$"; then
+            found+=("\$pattern")
+        fi
+    done
+    if [ \${#found[@]} -gt 0 ]; then
+        echo "Error: dev-only dotfiles in package: \${found[*]}" >&2
+        echo "These should be excluded from the distribution artifact." >&2
+        echo "Content of package:" >&2
+        echo "\$content" | sed 's/^/  /g' >&2
+        exit 1
+    fi
+EOF
