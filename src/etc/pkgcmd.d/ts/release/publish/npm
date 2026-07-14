@@ -1,6 +1,74 @@
 #!/bin/bash
 
+## Staged publishing (https://docs.npmjs.com/staged-publishing):
+## stage the artifact, show what was staged, then approve (2FA).
+## Requires npm >= 11.15 and an already-existing package on the
+## registry (brand-new packages cannot be staged: first-publish them
+## manually with ``npm publish``).
+
+if ! npm stage --help >/dev/null 2>&1; then
+    echo "Error: 'npm stage' unavailable (needs npm >= 11.15)." \
+         "Aborting before any publish action." >&2
+    exit 1
+fi
+
+## Route npm's 2FA browser-open through vigil-watch when available:
+## the auth URL then surfaces in vigil-ui (any device, incl. phone via
+## iroh) instead of only opening a local browser.  Falls back to the
+## normal browser behavior when the daemon is not running.
+if [ -x "$HOME/.local/libexec/vigil-browser-open" ] &&
+       curl -sf http://127.0.0.1:4097/api/info >/dev/null 2>&1; then
+    export npm_config_browser="$HOME/.local/libexec/vigil-browser-open"
+fi
 
 for pack in "$artifacts/build/"* ; do
-    npm publish --access public "$pack"
+    ## npm refuses to default prerelease versions (e.g. 1.0.0-rc.3)
+    ## to the 'latest' dist-tag: it requires an explicit --tag. We
+    ## keep the historical convention of publishing everything under
+    ## 'latest', overridable via PKG_NPM_PRERELEASE_TAG.
+    tag_opts=()
+    version=$(tar xzf "$pack" -O package/package.json | jq -r .version) || {
+        echo "Error: could not read version from '$pack'." >&2
+        exit 1
+    }
+    case "$version" in
+        *-*) tag_opts=(--tag "${PKG_NPM_PRERELEASE_TAG:-latest}") ;;
+    esac
+    out=$(npm stage publish --access public "${tag_opts[@]}" "$pack") || {
+        echo "Error: staging failed for '$pack'." >&2
+        echo "Note: brand-new packages cannot be staged; a first" \
+             "manual 'npm publish' is required." >&2
+        exit 1
+    }
+    echo "$out"
+    stage_id=$(printf '%s\n' "$out" |
+                   sed -n 's/^.*staged with id \([0-9a-f-]\{36\}\).*$/\1/p')
+    if [ -z "$stage_id" ]; then
+        echo "Error: could not parse stage id from 'npm stage publish'" \
+             "output above. Package is staged but NOT approved;" \
+             "inspect with 'npm stage list'." >&2
+        exit 1
+    fi
+    npm stage view "$stage_id" || exit 1
+    cat <<EOF
+──────────────────────────────────────────────────────────
+2FA approval required to publish (stage id: $stage_id)
+
+npm will now print an authentication link and open your
+browser: this is npm staged publishing deferring 2FA to
+this explicit approval step.
+
+Before authenticating, VERIFY the URL domain is:
+
+    https://www.npmjs.com/
+──────────────────────────────────────────────────────────
+EOF
+    npm stage approve "$stage_id" || {
+        echo "Error: approval failed or was refused. Package remains" \
+             "staged; approve later with:" >&2
+        echo "  npm stage approve $stage_id" >&2
+        echo "or discard with:" >&2
+        echo "  npm stage reject $stage_id" >&2
+        exit 1
+    }
 done
