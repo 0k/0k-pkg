@@ -160,6 +160,7 @@ pkg.run() {
         cd ..
     done
     if [ "$found_alternative" ]; then
+        export PKGCMD_ALTERNATIVES="$(pkg._list_pkg_alternatives)"
         pkg.cmd_alternative_run "$cmd" "$found_alternative" "$@"
     else
         die "No alternative found for package command '$cmd'."
