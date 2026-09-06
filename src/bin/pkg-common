@@ -985,7 +985,6 @@ test_all() {
     echo " > $WHITE$msg" | cutline "$SIZE_LINE"
     echo
 
-    variable_get || return 1
     cache_file $cache_prevent_opt "$pkg_save"/tests artifact_dir "full tests" <<EOF || return 1
         ## $other_hash $commit_md5 $tree_hash $md5_dovis $md5_targets $md5_dovis_args $md5_test_current $no_test
         ## $no_cover $description
@@ -996,6 +995,7 @@ EOF
         return 0
     fi
 
+    variable_get || return 1
     cache $cache_prevent_opt "$pkg_save"/dist_passed "test for dist" <<EOF || return 1
         ## $other_hash $commit_md5 $tree_hash $md5_dovis $md5_targets $no_dist_check $md5_dovis_args
         ## $description
@@ -1059,7 +1059,11 @@ for rev in "${check_intermediate[@]}"; do
 
     #git clean -f -d -x &&
     git checkout -q "$rev" >/dev/null || exit 1
-    description=$(git describe HEAD --tag)   ## autogen depends on that
+    ## autogen depends on that
+    description=$(git describe HEAD --tag) || {
+        err "Couldn't describe HEAD. Are there any tags in this repository ?"
+        exit 1
+    }
 
     other_hash=$(while read tag; do git log -n 1 --format="$tag:%ct" $tag ; done < <(git tag) | hash_get)
     if ! git diff --no-ext-diff --quiet --exit-code; then
@@ -1125,7 +1129,10 @@ done
 if [ -n "$publish" ]; then
 
     ## are we on a tag ?
-    description=$(git describe HEAD --tag)
+    description=$(git describe HEAD --tag) || {
+        err "Couldn't describe HEAD. Are there any tags in this repository ?"
+        exit 1
+    }
     if [ -z "$allow_publish_off_tags" ] && [[ "$(git tag -l | grep -F "$description")" != "$description" ]]; then
         die "Release are allowed only on git tags. (use \`--allow-publish-off-tags\` to force)"
     fi
