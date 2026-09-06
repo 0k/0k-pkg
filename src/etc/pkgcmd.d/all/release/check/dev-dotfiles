@@ -10,7 +10,7 @@ Wrap -d "check: '$dist' has no dev-only dotfiles" <<EOF || exit 1
         exit 1
     fi)
     found=()
-    for pattern in .gitignore .gitchangelog.rc .editorconfig; do
+    for pattern in .travis.yml .dovis.yml .gitchangelog.rc .editorconfig; do
         if echo "\$content" | grep -q "[/ ]\$pattern\$"; then
             found+=("\$pattern")
         fi
