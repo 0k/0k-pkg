@@ -1,0 +1,3 @@
+#!/bin/bash
+
+twine upload "$artifacts/build/"* -r "${PYPI_SERVER:-pypi}"
