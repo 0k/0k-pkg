@@ -7,6 +7,10 @@ pkgcmd:python:is_base() {
     [ -e setup.py ]
 }
 
+pkgcmd:python:applies() {
+    [ -e setup.py ]
+}
+
 ## ``t`` command -- runs all tests, fails at first failure by default
 pkgcmd:t:python:run() {
     [ -e setup.cfg ] &&  egrep '^[nosetests]' setup.cfg >/dev/null 2>&1 && {
