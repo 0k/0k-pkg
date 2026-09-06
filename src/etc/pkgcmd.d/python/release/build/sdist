@@ -1,0 +1,9 @@
+#!/bin/bash
+
+build="$1"
+
+mkdir -p "$build"
+python setup.py sdist -v --formats=gztar &&
+    mv "dist/"*"-$pkg_version.tar.gz" "$build/" &&
+    basename "$build/"*"-$pkg_version.tar.gz" "-$pkg_version.tar.gz" \
+        > "$build/.dist-filename"
