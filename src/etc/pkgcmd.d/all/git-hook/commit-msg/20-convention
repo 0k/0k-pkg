@@ -1,0 +1,312 @@
+#!/bin/bash
+
+msg_file="$1"
+
+## The password store (pass) manages its own commits; never audit them.
+if [ "$PWD" == "$HOME/.data-store-shared/pass" ]; then
+    exit 0
+fi
+
+## ── Convention audit (all committers, no exception) ──────────────────
+## Hard-checks the commit message against the canonical conventions
+## documented at ~/.claude/references/commit-conventions.md.
+##
+## Two passes:
+##   1. Structural grammar on the title line
+##         {type}: ({scope}: )?(\[module\] )?{description}( !minor)?
+##   2. Backtick / technical-token audit across the WHOLE message
+##         (single-backtick → double, --options, $VARs, paths,
+##          dotted filenames, CamelCase, snake_case)
+##
+## Tokens inside ``...`` double-backticks are MASKED before the
+## technical-token passes to avoid false positives.
+##
+## Bypass: `git commit --no-verify`.  LLM agents MUST NOT use
+## --no-verify without explicit user approval obtained via an MCP
+## Question — see the error message below.
+
+perl - "$msg_file" <<'PERL_AUDIT'
+use strict;
+use warnings;
+
+my $msg_file = shift @ARGV;
+open my $fh, '<', $msg_file or die "cannot read $msg_file: $!\n";
+my @raw_lines = <$fh>;
+close $fh;
+chomp @raw_lines;
+
+## Drop git comment lines and the diff-included scissors region.
+my @lines;
+my $in_scissors = 0;
+for my $l (@raw_lines) {
+    last if $l =~ /^# -+ >8 -+/;     ## scissors marker
+    next if $l =~ /^#/;
+    push @lines, $l;
+}
+
+## Strip leading blank lines, drop trailing blanks for stable indexing.
+while (@lines && $lines[0]  =~ /^\s*$/) { shift @lines; }
+while (@lines && $lines[-1] =~ /^\s*$/) { pop   @lines; }
+
+if (!@lines) {
+    print STDERR "commit-msg: REJECTED — empty commit message.\n";
+    exit 1;
+}
+
+## Autosquash-marked commits (fixup!/squash!/amend!, possibly stacked
+## like `fixup! fixup! foo`) are absorbed by `git rebase --autosquash`
+## into their target commit, so the convention audit happens once on
+## the target and need not be repeated here.
+if ($lines[0] =~ /^(?:fixup|squash|amend)!\s/) {
+    exit 0;
+}
+
+my @violations;
+
+sub add_violation {
+    my ($lineno, $tag, $detail, $offender) = @_;
+    my $loc = defined $lineno ? "L$lineno" : "msg";
+    my $off = defined $offender ? "  offending: «$offender»" : "";
+    push @violations, "  [$loc] $tag: $detail$off";
+}
+
+## ── Pass 1: structural grammar on title ──────────────────────────────
+my $title = $lines[0];
+
+## Canonical grammar:
+##   ^(fix|chg|new):( (dev|doc|test|pkg):)?( \[[^\[\]]+\])? \S.* description
+##   description: must contain NO '[' and NO bare '.' (outside
+##                double-backticks).  may end with ' !minor'.
+##
+## We split the title into prefix + description and then validate the
+## description body separately so the error messages stay specific.
+
+if ($title !~ /^(fix|chg|new):/) {
+    add_violation(1, 'TITLE-PREFIX',
+        'first word must be one of `fix:`, `chg:`, `new:` followed by a colon',
+        $title);
+} else {
+    my $rest = $title;
+    $rest =~ s/^(fix|chg|new):\s*// or do {
+        add_violation(1, 'TITLE-PREFIX',
+            'expected a space after the type colon',
+            $title);
+    };
+
+    ## Optional scope
+    if ($rest =~ /^(dev|doc|test|pkg):\s*/) {
+        $rest =~ s/^(dev|doc|test|pkg):\s*//;
+    } elsif ($rest =~ /^([a-z]+):\s*/) {
+        add_violation(1, 'TITLE-SCOPE',
+            "unknown scope `$1:` (allowed: dev, doc, test, pkg)",
+            $title);
+        $rest =~ s/^([a-z]+):\s*//;
+    }
+
+    ## Optional [module]
+    my $module;
+    if ($rest =~ s/^\[([^\[\]]+)\]\s*//) {
+        $module = $1;
+        if ($module =~ /^\s*$/) {
+            add_violation(1, 'TITLE-MODULE',
+                'empty [module] bracket',
+                $title);
+        }
+        if ($module =~ /[\[\]]/) {
+            add_violation(1, 'TITLE-MODULE',
+                'nested or unbalanced brackets in [module]',
+                $title);
+        }
+    } elsif ($rest =~ /^\[/) {
+        add_violation(1, 'TITLE-MODULE',
+            'malformed [module] (unbalanced or empty brackets)',
+            $title);
+    }
+
+    ## Description
+    my $desc = $rest;
+    ## Strip optional !minor suffix
+    my $had_minor = ($desc =~ s/\s+!minor\s*$//);
+    if ($desc =~ /!minor/) {
+        add_violation(1, 'TITLE-MINOR',
+            '`!minor` must appear only at the very end of the title',
+            $title);
+    }
+
+    if ($desc =~ /^\s*$/) {
+        add_violation(1, 'TITLE-DESC',
+            'description is empty',
+            $title);
+    }
+
+    ## No '[' in description (per user rule)
+    if ($desc =~ /\[/) {
+        add_violation(1, 'TITLE-DESC',
+            'description must not contain `[` — only one [module] is allowed and it must come right after the type/scope',
+            $title);
+    }
+
+    ## No bare '.' in description outside double-backticks
+    my $desc_masked = $desc;
+    $desc_masked =~ s/``[^`]+``/__MASKED__/g;
+    if ($desc_masked =~ /\./) {
+        add_violation(1, 'TITLE-DESC',
+            'description must not contain a bare `.` — wrap dotted technical terms (e.g. ``README.org``) in double-backticks, and omit trailing periods',
+            $title);
+    }
+
+    ## Title length <= 96 chars (per convention doc)
+    if (length($title) > 96) {
+        add_violation(1, 'TITLE-LEN',
+            sprintf('title is %d chars, must be ≤ 96', length($title)),
+            $title);
+    }
+}
+
+## ── Pass 2: backtick / technical-token audit (whole message) ─────────
+## Mask out all ``...`` double-backtick spans first so we don't flag
+## tokens that are already correctly wrapped.
+
+for my $i (0 .. $#lines) {
+    my $lineno = $i + 1;
+    my $line   = $lines[$i];
+
+    ## Skip Assisted-by / Signed-off-by / Refs / Fixes / Co-authored-by
+    ## trailer-style lines from token scanning (they have their own
+    ## conventions). Keep them in the title pass though.
+    next if $lineno > 1 && $line =~ /^[A-Z][A-Za-z-]+:\s/;
+
+    ## (a) Single-backticked tokens   `foo`  → should be ``foo``
+    ##     Detect a backtick that is NOT part of a `` pair on either
+    ##     side, wrapping a token.
+    my $scan = $line;
+    while ($scan =~ /(?<!`)`([^`\n]+)`(?!`)/g) {
+        my $tok = $1;
+        add_violation($lineno, 'SINGLE-BACKTICK',
+            "use double-backticks: ``$tok`` (not `$tok`)",
+            "`$tok`");
+    }
+
+    ## Now mask correctly-wrapped ``...`` spans for the remaining checks.
+    my $masked = $line;
+    $masked =~ s/``[^`]+``/\0/g;  ## use NUL as placeholder (never appears in commit msgs)
+
+    ## (b) Bare --long-option (e.g.  --no-verify, --format=json)
+    while ($masked =~ /(?<![`\w\-])(--[A-Za-z][A-Za-z0-9\-]*)/g) {
+        my $tok = $1;
+        add_violation($lineno, 'BARE-OPTION',
+            "wrap long option in double-backticks: ``$tok``",
+            $tok);
+    }
+
+    ## (c) Bare $VAR shell variables (e.g.  $HOME, $PATH, $SERVICE_DATASTORE)
+    while ($masked =~ /(?<![`\w])(\$[A-Z_][A-Z0-9_]*)/g) {
+        my $tok = $1;
+        add_violation($lineno, 'BARE-VAR',
+            "wrap shell variable in double-backticks: ``$tok``",
+            $tok);
+    }
+
+    ## (d) Bare paths: anything with a / that contains a known-pathy shape
+    ##     Examples: src/foo.rs, bin/test, ~/.config/, /etc/hosts
+    while ($masked =~ m{(?<![`\w/])(~?/?(?:[A-Za-z0-9_.\-]+/)+[A-Za-z0-9_.\-]*)(?![`\w/])}g) {
+        my $tok = $1;
+        ## Filter out trivial false positives:
+        next if $tok =~ m{^/$};        ## bare slash
+        next if length($tok) < 4;       ## a/b is noise
+        next if $tok =~ m{^https?:};    ## URLs
+        ## Must contain at least one '/' AND look pathy (letter or dot)
+        next unless $tok =~ m{/} && $tok =~ /[A-Za-z]/;
+        add_violation($lineno, 'BARE-PATH',
+            "wrap path in double-backticks: ``$tok``",
+            $tok);
+    }
+
+    ## (e) Bare dotted filenames (no slash): README.org, Cargo.toml, foo.rs
+    ##     We look for word.word with a recognizable extension.
+    my @ext_re = qw(
+        org md txt toml json yaml yml lock rs py ts tsx js jsx go java
+        c h cpp hpp el sh bash zsh fish lua rb php html css scss xml
+        ini cfg conf service log
+    );
+    my $ext_alt = join('|', @ext_re);
+    while ($masked =~ /(?<![`\w\/])([A-Za-z][A-Za-z0-9_\-]*\.(?:$ext_alt))(?![`\w\/])/g) {
+        my $tok = $1;
+        add_violation($lineno, 'BARE-FILENAME',
+            "wrap filename in double-backticks: ``$tok``",
+            $tok);
+    }
+
+    ## (f) Bare CamelCase identifiers (DateTime, BufReader)
+    ##     Heuristic: ≥ 2 uppercase humps, no spaces.  Skip common words.
+    my %camel_skip = map { $_ => 1 } qw(
+        OK TODO FIXME XXX HACK NOTE OpenAI OpenCode ChatGPT WebView WebKit
+        PostgreSQL KiB MiB GiB TiB KHz MHz GHz JavaScript TypeScript
+        PowerShell JSONPath YAML JSON GitHub GitLab DataFlow OAuth JavaDoc
+        HiDPI
+    );
+    while ($masked =~ /(?<![`\w])([A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+)(?![`\w])/g) {
+        my $tok = $1;
+        next if $camel_skip{$tok};
+        add_violation($lineno, 'BARE-CAMEL',
+            "wrap identifier in double-backticks: ``$tok``",
+            $tok);
+    }
+
+    ## (g) Bare snake_case identifiers (parse_time, get_user_id)
+    ##     Heuristic: contains '_' and at least one [a-z], no spaces.
+    while ($masked =~ /(?<![`\w])([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?![`\w])/g) {
+        my $tok = $1;
+        ## Skip common false positives (rare but possible)
+        add_violation($lineno, 'BARE-SNAKE',
+            "wrap identifier in double-backticks: ``$tok``",
+            $tok);
+    }
+}
+
+## ── Report ──────────────────────────────────────────────────────────
+if (@violations) {
+    print STDERR "commit-msg: REJECTED — commit-convention violations\n";
+    print STDERR "\n";
+    for my $v (@violations) {
+        print STDERR "$v\n";
+    }
+    print STDERR "\n";
+    print STDERR "  Canonical reference:  ~/.claude/references/commit-conventions.md\n";
+    print STDERR "\n";
+    print STDERR "  Rules (summary):\n";
+    print STDERR "    • Title: `{type}: ({scope}: )?(\\[module\\] )?{description}( !minor)?`\n";
+    print STDERR "    • Types:  fix | chg | new           Scopes: dev | doc | test | pkg\n";
+    print STDERR "    • Wrap every technical term in DOUBLE-backticks: ``foo`` not `foo`\n";
+    print STDERR "      (filenames, paths, --long-options, \$VARS, function/type names)\n";
+    print STDERR "    • Description must contain no `[` and no bare `.`\n";
+    print STDERR "    • Title must be ≤ 72 chars and end with no trailing period\n";
+    print STDERR "\n";
+    print STDERR "  For LLM agents — IMPORTANT:\n";
+    print STDERR "    If you are reading this, you must NOT bypass this hook autonomously.\n";
+    print STDERR "    1. READ ~/.claude/references/commit-conventions.md and fix the message.\n";
+    print STDERR "    2. Use the shell HEREDOC pattern documented there for backticks:\n";
+    print STDERR "         git commit -m \"\$(cat <<'EOF'\n";
+    print STDERR "         fix: [scope] correct \`\`some-technical-term\`\` behavior\n";
+    print STDERR "         EOF\n";
+    print STDERR "         )\"\n";
+    print STDERR "    3. If a BARE-CAMEL token is a legitimate brand, product, protocol,\n";
+    print STDERR "       acronym, or proper name rather than a code identifier, do not\n";
+    print STDERR "       backtick, reword, or bypass. Ask the user via the MCP `Question`\n";
+    print STDERR "       tool whether to add the exact token to the CamelCase exception list\n";
+    print STDERR "       in ~/.pkgcmd.d/all/git-hook/commit-msg/20-convention; after approval,\n";
+    print STDERR "       add it, verify the hook, and retry.\n";
+    print STDERR "    4. Only if — AFTER reading the conventions — you have a legitimate\n";
+    print STDERR "       reason to keep this message (e.g. committing in a foreign repo\n";
+    print STDERR "       with its own convention), you must ASK THE USER VIA THE MCP\n";
+    print STDERR "       `Question` TOOL for explicit approval to use `git commit --no-verify`.\n";
+    print STDERR "       Never bypass without that explicit approval.\n";
+    exit 1;
+}
+
+exit 0;
+PERL_AUDIT
+audit_rc=$?
+if [ $audit_rc -ne 0 ]; then
+    exit $audit_rc
+fi

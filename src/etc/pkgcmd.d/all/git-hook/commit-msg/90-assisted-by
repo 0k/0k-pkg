@@ -1,0 +1,41 @@
+#!/bin/bash
+
+## The password store (pass) manages its own commits; never audit them.
+if [ "$PWD" == "$HOME/.data-store-shared/pass" ]; then
+    exit 0
+fi
+
+## Add AI-assisted attribution trailers when running inside an AI session.
+## `ai-audit assisted-by` owns session detection and provider/model
+## normalization.  It may emit multiple lines for nested harnesses using
+## distinct models.  Exact duplicates are ignored by git interpret-trailers.
+if command -v ai-audit >/dev/null 2>&1; then
+    msg_file="$1"
+    assisted_by_err=$(mktemp -t ai-audit-assisted-by-XXXXXX)
+    assisted_by_out=$(ai-audit assisted-by --quiet-if-no-session 2>"$assisted_by_err")
+    assisted_by_rc=$?
+
+    if [ $assisted_by_rc -ne 0 ]; then
+        if [ -n "${OPENCODE_SESSION_ID:-}${CLAUDE_SESSION_ID:-}${PI_SESSION_ID:-}${OPENCODE:-}" ]; then
+            echo "commit-msg: REJECTED" >&2
+            echo "  Could not resolve AI Assisted-by attribution." >&2
+            sed 's/^/  /' "$assisted_by_err" >&2
+            rm -f "$assisted_by_err"
+            exit 1
+        fi
+        echo "commit-msg: warning: ai-audit assisted-by failed; leaving message unchanged" >&2
+        sed 's/^/  /' "$assisted_by_err" >&2
+    elif [ -n "$assisted_by_out" ]; then
+        while IFS= read -r trailer; do
+            [ -n "$trailer" ] || continue
+            git interpret-trailers --in-place \
+                --if-exists addIfDifferent \
+                --trailer "$trailer" \
+                "$msg_file"
+        done <<EOF
+$assisted_by_out
+EOF
+    fi
+    rm -f "$assisted_by_err"
+fi
+

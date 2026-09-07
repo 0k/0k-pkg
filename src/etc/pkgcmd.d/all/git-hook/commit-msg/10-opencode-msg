@@ -1,0 +1,27 @@
+#!/bin/bash
+## ── OpenCode-only message checks ────────────────────────────────────
+
+msg_file="$1"
+
+## The password store (pass) manages its own commits; never audit them.
+if [ "$PWD" == "$HOME/.data-store-shared/pass" ]; then
+    exit 0
+fi
+
+if [ "${OPENCODE:-0}" = "1" ]; then
+    ## Block Co-authored-by lines
+    if grep -qi '^Co-authored-by:' "$msg_file"; then
+        echo "OpenCode commit-msg: REJECTED" >&2
+        echo "  Co-authored-by line detected — not allowed." >&2
+        echo "  Remove it from the commit message and retry." >&2
+        exit 1
+    fi
+
+    ## Block "Ultraworked" in commit body
+    body=$(sed '1d; /^#/d' "$msg_file")
+    if printf '%s' "$body" | grep -qi 'ultraworked'; then
+        echo "OpenCode commit-msg: REJECTED" >&2
+        echo "  Forbidden word \"Ultraworked\" found in commit body." >&2
+        exit 1
+    fi
+fi

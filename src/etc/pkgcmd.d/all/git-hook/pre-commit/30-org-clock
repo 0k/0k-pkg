@@ -1,0 +1,61 @@
+#!/bin/bash
+
+## ── CLOCK-line lint on staged *.org ────────────────────────
+## Runs ``org-cli clock check`` against the STAGED content of
+## each *.org file in the commit (not the working-tree version).
+## See ~/.claude/references/clock-format.md for the canonical
+## format and violation taxonomy.
+##
+## Skipped silently when:
+##  * no .org files are staged
+##  * the ``org-cli`` binary is not on PATH
+## Bypass with ``git commit --no-verify`` if absolutely needed.
+
+if command -v org-cli >/dev/null 2>&1; then
+    org_files_staged=$(
+        git diff --cached --name-only --diff-filter=ACMR -- '*.org' 2>/dev/null
+    )
+    if [ -n "$org_files_staged" ]; then
+        clock_tmp=$(mktemp -d -t org-cli-pre-commit-XXXXXX)
+        # Ensure the tempdir is cleaned up even on early exit.
+        trap 'rm -rf "$clock_tmp"' EXIT
+
+        clock_failed=0
+        while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            staged_blob="$clock_tmp/$(echo "$f" | tr '/' '_')"
+            ## ``git show :PATH`` reads the index version of the file.
+            if ! git show ":$f" >"$staged_blob" 2>/dev/null; then
+                ## Path may not be in the index (race / odd state); skip.
+                continue
+            fi
+            ## ``clock check`` exits 0 clean, 1 on violations,
+            ## anything else on usage / I/O errors. We only treat
+            ## exit 1 as a hard block; other failures (e.g. the
+            ## file is non-UTF-8) are surfaced but don't abort.
+            check_out=$(org-cli clock check "$staged_blob" 2>&1)
+            check_rc=$?
+            if [ $check_rc -eq 1 ]; then
+                if [ $clock_failed -eq 0 ]; then
+                    echo >&2 "BLOCKED: org-cli clock check found violations on staged *.org files."
+                    echo >&2 "See ~/.claude/references/clock-format.md for the rules."
+                    echo >&2 "Bypass with --no-verify if you really must."
+                    echo >&2
+                fi
+                ## Rewrite the temp path back to the real path in
+                ## the report so editors can jump to the right file.
+                echo >&2 "--- $f ---"
+                echo "$check_out" | sed "s|$staged_blob|$f|g" >&2
+                echo >&2
+                clock_failed=1
+            elif [ $check_rc -ne 0 ]; then
+                ## Non-fatal warning channel.
+                echo >&2 "warning: org-cli clock check on $f exited $check_rc: $check_out"
+            fi
+        done <<< "$org_files_staged"
+
+        if [ $clock_failed -ne 0 ]; then
+            exit 1
+        fi
+    fi
+fi

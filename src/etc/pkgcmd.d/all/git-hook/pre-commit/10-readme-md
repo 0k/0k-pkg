@@ -1,0 +1,28 @@
+#!/bin/bash
+## ── Hard block: README.md when README.org exists ─────────────────────
+## README.md is auto-generated from README.org and must never be committed.
+## Fires for ALL committers (not just OpenCode), no whitelist override.
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+
+if [ -f "$repo_root/README.org" ]; then
+    readme_md_staged=$(git diff --cached --name-only --diff-filter=ACM | grep -ix 'readme\.md' || true)
+    if [ -n "$readme_md_staged" ]; then
+        gitignore="$repo_root/.gitignore"
+        md_in_gitignore=true
+        if ! { [ -f "$gitignore" ] && grep -qxF 'README.md' "$gitignore"; }; then
+            md_in_gitignore=false
+        fi
+
+        echo >&2 "BLOCKED: README.md is staged but this repo has README.org."
+        echo >&2 "README.md is auto-generated from README.org. Any edits to it will be lost."
+        echo >&2 "Edit README.org instead."
+        echo >&2 ""
+        echo >&2 "Fix:"
+        echo >&2 "  git reset HEAD README.md"
+        if [ "$md_in_gitignore" = false ]; then
+            echo >&2 "  echo 'README.md' >> .gitignore"
+        fi
+        exit 1
+    fi
+fi
