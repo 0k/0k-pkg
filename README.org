@@ -143,6 +143,45 @@ Outputs diffable statistics about the codebase.
 stats
 #+end_src
 
+*** ~pkg-git-hook~ - Global git hooks
+
+Runs the git hook check scripts for a given hook name.  This is the
+entry point used by the global ~core.hooksPath~ trampolines (see the
+~git~ charm in =0k-cfg=): each trampoline is a two-line script that
+~exec~s ~pkg-git-hook <HOOK> "$@"~.
+
+#+begin_src sh
+# Called by git through ~/.config/git/hooks/pre-commit
+pkg-git-hook pre-commit
+
+# Called by git through ~/.config/git/hooks/commit-msg
+pkg-git-hook commit-msg .git/COMMIT_EDITMSG
+#+end_src
+
+For a hook ~HOOK~, every executable in ~git-hook/HOOK/~ of each
+applying package type is run in sorted order with the arguments git
+passed to the hook.  The first non-zero exit aborts and becomes the
+hook's exit code.  On success the repository-local
+~.git/hooks/HOOK~ is ~exec~'d if present, so per-repository hooks
+keep working underneath the global ones.
+
+The command is silent on success, as git hooks are expected to be.
+
+It is not named ~git-hook~: git prepends its ~--exec-path~ to ~PATH~
+when running hooks, and ~git-core/git-hook~ (the ~git hook~
+builtin) would shadow it.
+
+Checks shipped for the ~all~ package type:
+
+| Hook         | Script                | Purpose                                                        |
+|--------------+-----------------------+----------------------------------------------------------------|
+| ~pre-commit~ | ~10-readme-md~        | Block ~README.md~ when ~README.org~ exists                     |
+| ~pre-commit~ | ~20-opencode-paths~   | OpenCode sessions: block ~doc/admin.org~, ~.sisyphus/~, ~*.md~ |
+| ~pre-commit~ | ~30-org-clock~        | ~org-cli clock check~ on staged ~*.org~                        |
+| ~commit-msg~ | ~10-opencode-msg~     | OpenCode sessions: block ~Co-authored-by~ / "Ultraworked"      |
+| ~commit-msg~ | ~20-convention~       | Commit message convention audit                                |
+| ~commit-msg~ | ~90-assisted-by~      | Add ~Assisted-by:~ trailer from ~ai-audit~                     |
+
 ** Source Selection
 
 The ~pkg~ command supports multiple source selection modes:
@@ -284,6 +323,7 @@ For release workflow integration, create executable scripts in:
 - ~<type>/release/build/~ - Build distribution files
 - ~<type>/release/check/~ - Post-build validation
 - ~<type>/release/publish/~ - Publishing commands
+- ~<type>/git-hook/<hook>/~ - Git hook checks run by ~pkg-git-hook~
 
 * License
 

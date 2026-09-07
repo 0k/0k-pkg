@@ -1,0 +1,99 @@
+#!/bin/bash
+## ── OpenCode-only path checks ────────────────────────────────────────
+## Blocks doc/admin.org, .sisyphus/ and (unless whitelisted or explicitly
+## approved) *.md files when committing from an OpenCode session.
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+
+if [ "${OPENCODE:-0}" = "1" ]; then
+    staged=$(git diff --cached --name-only --diff-filter=ACM)
+    errors=()
+    has_md_error=false
+
+    ## A value of exactly 1 records explicit user approval for this invocation.
+    ## It only relaxes the .md check below; all other checks still run.
+    md_commit_approved=false
+    if [ "${OPENCODE_MD_COMMIT_APPROVED:-0}" = "1" ]; then
+        md_commit_approved=true
+    fi
+
+    ## Check if repo is in the .md commit whitelist
+    md_whitelist="$HOME/.config/git/opencode-md-whitelist"
+    md_allowed=false
+    if [ -f "$md_whitelist" ]; then
+        while IFS= read -r entry; do
+            entry="${entry%%#*}"                            # strip comments
+            entry="${entry#"${entry%%[![:space:]]*}"}"      # ltrim
+            entry="${entry%"${entry##*[![:space:]]}"}"      # rtrim
+            [ -z "$entry" ] && continue
+            entry="${entry/#\~/$HOME}"                      # expand ~
+            if [ "$repo_root" = "$entry" ]; then
+                md_allowed=true
+                break
+            fi
+        done < "$md_whitelist"
+    fi
+
+    while IFS= read -r file; do
+        [ -z "$file" ] && continue
+
+        ## Block doc/admin.org (personal notes, never commit)
+        case "$file" in
+            doc/admin.org|*/doc/admin.org)
+                errors+=("  $file — doc/admin.org is personal notes, never commit")
+                ;;
+        esac
+
+        ## Block .md files unless repo is whitelisted
+        if [ "$md_allowed" = false ] && [ "$md_commit_approved" = false ]; then
+            case "${file,,}" in
+                *.md)
+                    errors+=("  $file — .md files not allowed in this repo")
+                    has_md_error=true
+                    ;;
+            esac
+        fi
+
+        ## Block .sisyphus/ directory (internal, never commit)
+        case "$file" in
+            .sisyphus/*|*/.sisyphus/*)
+                errors+=("  $file — .sisyphus/ is internal, never commit")
+                ;;
+        esac
+    done <<< "$staged"
+
+    if [ "${#errors[@]}" -gt 0 ]; then
+        echo "OpenCode pre-commit: REJECTED" >&2
+        printf '%s\n' "${errors[@]}" >&2
+        if [ "$has_md_error" = true ]; then
+            cat >&2 <<'MSG'
+
+  This repository is not in the .md commit whitelist.
+  OpenCode should not commit .md files in most repositories.
+
+  Resolution paths (LLM agents: present BOTH to the user, do NOT pick
+  silently):
+
+    1. Permanent: ask the user whether this repo should be added to
+       ~/.config/git/opencode-md-whitelist. Use this when .md is the
+       repo's legitimate documentation surface (e.g. AGENTS.md is
+       tracked and there is no .org equivalent).
+
+    2. One-off exception: ask the user for EXPLICIT approval to allow
+       .md files for THIS commit only. After approval, set the variable
+       on that commit invocation only (do not export it):
+
+         OPENCODE_MD_COMMIT_APPROVED=1 git commit ...
+
+       This skips only the .md restriction. All other pre-commit checks
+       and the commit-msg attribution still run. Use this when the .md
+       edit is genuinely a one-time event (e.g. updating a single
+       existing tracked .md file) and adding the repo to the whitelist
+       would be overreach.
+
+  Both paths require user input. NEVER bypass this hook autonomously.
+MSG
+        fi
+        exit 1
+    fi
+fi
