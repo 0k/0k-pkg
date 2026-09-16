@@ -1,0 +1,61 @@
+#!/bin/bash
+## ── Hard block: substituted ``%%macro%%`` placeholders ──────────────
+## ``autogen.sh`` rewrites ``%%version%%``, ``%%name%%``, ``%%author%%``
+## ... in the working tree at build/release time (see
+## ``share/autogen.sh`` ``prepare_files()``).  Those substituted files
+## must never reach git: the placeholder is the source of truth.
+##
+## For every staged modification, compare the ``%%...%%`` tokens found
+## in the HEAD blob with those in the index blob.  Any token present in
+## HEAD but missing from the index means a placeholder got replaced.
+##
+## Fires for ALL committers, no whitelist override.  Bypass with
+## ``git commit --no-verify`` if absolutely needed.
+
+macro_re='%%[a-z][a-z0-9-]*%%'
+
+## Print the sorted, unique set of macro tokens found in a git blob.
+## Empty when the blob does not exist (e.g. path absent from HEAD).
+list_macros() {
+    git show "$1" 2>/dev/null | grep -oE "$macro_re" | sort -u
+}
+
+## Initial commit: no HEAD to compare against, nothing can be "lost".
+if ! git rev-parse --verify -q HEAD >/dev/null; then
+    exit 0
+fi
+
+errors=()
+while IFS=$'\t' read -r status old new; do
+    [ -z "$status" ] && continue
+    case "$status" in
+        M*) new="$old" ;;   ## modified in place: ``M<TAB>path``
+        R*) ;;              ## renamed: ``R<score><TAB>old<TAB>new``
+        *)  continue ;;     ## added / deleted / others: nothing to lose
+    esac
+    lost=$(comm -23 <(list_macros "HEAD:$old") <(list_macros ":$new"))
+    [ -z "$lost" ] && continue
+    while IFS= read -r macro; do
+        errors+=("  $new: $macro was replaced")
+    done <<< "$lost"
+done < <(git diff --cached --name-status -M --diff-filter=MR)
+
+if [ "${#errors[@]}" -gt 0 ]; then
+    echo >&2 "BLOCKED: staged changes replace packaging placeholder(s):"
+    printf '%s\n' "${errors[@]}" >&2
+    cat >&2 <<'MSG'
+
+These %%...%% macros are substituted by autogen.sh at build/release
+time and must stay verbatim in git. Committing the substituted value
+freezes a stale version and breaks the next release.
+
+Fix: restore the placeholder line(s) and re-stage. To keep the other
+hunks of the file, use interactive checkout against HEAD:
+
+  git checkout -p HEAD -- FILE     # accept only the placeholder hunk
+  git add FILE
+
+(LLM agents: do NOT bypass with --no-verify; restore the placeholder.)
+MSG
+    exit 1
+fi
