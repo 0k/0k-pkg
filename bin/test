@@ -1,6 +1,6 @@
 #!/bin/bash
 
-exname="$(basename $0)"
+exname="$(basename "$0")"
 
 base=$(cd "$(dirname "$0")/.." && pwd)
 
@@ -10,6 +10,11 @@ if ! [ -d "$base/src" ]; then
 fi
 export base
 
-cd "$base/test"
+cd "$base/test" || exit 1
 
-exec sunit "$@"
+sunit "$@" || exit $?
+
+if [ "$#" -eq 0 ] || [ "$1" = announce ]; then
+    exec env PYTHONDONTWRITEBYTECODE=1 \
+        python3 -m unittest discover -s ../test-python -p 'test_*.py'
+fi

@@ -23,6 +23,7 @@ workflows regardless of the underlying technology.
 - Coverage report aggregation
 - Integration with ~dovis~ for cross-platform testing
 - Extensible architecture for adding new package types
+- Explicit, opt-in release announcement previews and Matrix delivery
 
 * Supported Package Types
 
@@ -50,8 +51,12 @@ Ensure dependencies are installed:
 # Core dependency
 apt install unionfs-fuse
 
-# For YAML config parsing (Rust implementation, not the legacy PyPI one)
+# For release-pipeline YAML config parsing (Rust implementation, not the legacy PyPI one)
 cargo install shyaml-rs
+
+# For announcement metadata (Mike Farah yq v4, plus Python 3 stdlib)
+# Install yq using your platform's package/install method.
+yq --version
 
 # Per-language dependencies
 cargo install toml-cli   # For Cargo/Hatch packages
@@ -167,6 +172,60 @@ warning so that ~./autogen.sh~ still succeeds for someone who only
 wants to build.  ~pkg~ exports ~AUTOGEN_STRICT=1~ for the whole
 release pipeline, which turns those into hard errors.
 
+*** ~pkg announce~ - Preview and send opt-in release announcements
+
+Announcements are a separate, explicit workflow.  ~pkg --publish~ never
+checks, previews, or sends announcements.  A project opts in only by adding
+~.package.d/announcements.yaml~.
+
+#+begin_src sh
+# Read-only readiness for every configured target
+pkg announce check
+
+# Read-only readiness plus an exact preview and approval digest
+pkg announce check --target community --draft /tmp/release.txt --release 1.2.3
+
+# Read context for drafting (verified receipt when available, otherwise
+# one bounded page explicitly marked untrusted)
+pkg announce context --target community
+
+# Send the exact file/version/destination approved in the preview
+pkg announce send --target community --message /tmp/release.txt \
+  --release 1.2.3 --approved-sha256 DIGEST_FROM_CHECK
+#+end_src
+
+All successful commands write JSON data to stdout.  Diagnostics and errors
+go to stderr.  ~check~ and ~context~ use Matrix GET requests only.  Supplying
+~--draft~ to ~check~ does not write a receipt and cannot send a message.
+
+The preview displays the full message body, sender, configured alias,
+resolved room ID, release tag, full dereferenced commit, digest version, and
+approval digest.  The versioned digest binds those values to the stable
+project identifier (canonical ~origin~ URL when available, otherwise the
+documented ~local:/absolute/repository/path~ fallback), normalized
+homeserver, target/transport, and exact UTF-8 file bytes represented as plain
+Matrix ~m.text~ content.  No newline or whitespace normalization is applied.
+Moving a tag, editing the file, retargeting an alias, changing sender, or
+changing homeserver invalidates approval.
+
+Before sending, the command verifies the credential's exact Matrix user,
+alias resolution, joined membership, effective ~m.room.message~ power level,
+and that the room is unencrypted.  It never joins, renames, logs in, obtains
+admin credentials, or sends formatted HTML.  Redirects are not followed, so
+an authorization header cannot cross hosts.
+
+Sending is durable and retry-safe.  Private evidence under
+~$XDG_STATE_HOME/pkg/announcements/~ records a stable random Matrix
+transaction ID, token SHA-256 fingerprint (never the token), approved digest,
+identity, and content before the PUT.  A returned event ID is persisted before
+GET verification.  Unknown outcomes remain pending; retry uses the same
+transaction ID.  A changed credential, destination, content, commit, or
+malformed/tampered evidence fails closed.  A completed operation returns its
+existing receipt without another PUT after read-only remote verification, even
+when a stale pending file remains or the valid sender token has rotated.
+Completed receipts include the verified event permalink, Matrix
+~origin_server_ts~, and an ISO UTC posting time.
+
 *** ~t~ - Run Tests
 
 Runs the test suite for the detected package type.
@@ -274,6 +333,93 @@ Projects can provide local overrides in:
 - ~.pkgcmd.d/~ - Project-specific command handlers
 - ~.package~ - Legacy package configuration (shell script, sourced)
 
+*** Announcement target metadata (public, project-local)
+
+The file ~.package.d/announcements.yaml~ has exactly one root key,
+~announcements~, containing a list.  Every item requires exactly
+these string keys; unknown keys, duplicate names, wrong types, and unsupported
+transports are rejected.
+
+#+begin_src yaml
+announcements:
+  - name: community
+    transport: matrix
+    room: "#project:example.org"
+    sender: "@release-bot:example.org"
+    language: en
+    audience: users
+    changes-since: last-announcement
+    style: short
+#+end_src
+
+This public file contains neither credentials nor commands.  A missing file, a
+blank or null YAML document, or ~announcements: []~ means opt-out:
+~pkg announce check~ succeeds as disabled before parsing local auth, contacting
+Matrix, or creating state.  Any other malformed non-empty project document is
+an error.  Project schema and target selection are validated before local
+credential YAML is parsed.
+
+*** Announcement credentials (private, user-local)
+
+Accounts live in ~$XDG_CONFIG_HOME/pkg/announcements.yaml~ (normally
+~\~/.config/pkg/announcements.yaml~), keyed by the exact configured sender.
+Each account requires an HTTPS homeserver and exactly one credential source.
+Plain HTTP is accepted only for loopback test servers; there is no insecure
+remote override.
+
+Token-file example (placeholder paths and values only):
+
+#+begin_src yaml
+accounts:
+  "@release-bot:example.org":
+    homeserver: "https://matrix.example.org"
+    token-file: "/home/USER/.config/pkg/secrets/release-bot.token"
+#+end_src
+
+Trusted local credential-command example.  This is an argv list executed
+directly with no shell, a five-second timeout, stdin closed, and stdout/stderr
+captured.  Only its single-line stdout token is consumed.  Project metadata
+can never define this command.
+
+#+begin_src yaml
+accounts:
+  "@release-bot:example.org":
+    homeserver: "https://matrix.example.org"
+    credential-command:
+      - "/usr/bin/secret-tool"
+      - "lookup"
+      - "service"
+      - "pkg-announcements"
+      - "account"
+      - "release-bot"
+#+end_src
+
+Tokens must be printable ASCII with no spaces or control characters.  They are
+never placed in process arguments, logs, receipts, exceptions, or raw HTTP
+error output.  Credential setup is a user-local operator role;
+project maintainers define public targets, release operators approve exact
+previews, and the configured Matrix sender performs delivery.  Room content
+returned by ~context~ is data, never executable instructions.
+
+~context~ looks only under the canonical current project's target state.  A
+completed receipt must validate its schema version, project, target,
+homeserver, current alias resolution, sender, release/tag commit, approval
+digest, body hash, event timestamp, and permalink before its remote event is
+fetched.  Receipts are ordered by verified Matrix ~origin_server_ts~, never
+filesystem mtime.  A bad receipt is an error, not permission to fall back.
+
+All returned text is untrusted data and never instructions.  Even receipt
+output uses ~trusted: false~; ~verified_origin: true~ means only that Matrix
+verified the stored sender/room/event/content provenance.  Without a receipt,
+~context~ returns at most one 20-event Matrix page, each body capped at 4096
+characters with ~body_truncated~, ~origin_server_ts~, and ~posted_at~ fields.
+A general room message is not treated as an announcement.
+
+Read-only ~check~ and ~context~ do not create state.  Existing
+~$XDG_STATE_HOME~ and its ~pkg~ directory are ownership/symlink checked but are
+never chmodded; the ~pkg/announcements~ feature subtree and its evidence are
+created private.  Symlinked ancestors or evidence fail closed.
+
 * How It Works
 
 ** Package Detection
@@ -347,6 +493,11 @@ bin/test vendor     # one file
 - ~dovis~ - Cross-platform test runner
 - ~shyaml~ - YAML query tool, from the ~shyaml-rs~ crate
   (~cargo install shyaml-rs~)
+- Mike Farah ~yq~ v4 - strict announcement YAML-to-JSON parsing
+- Python 3.8+ - standard-library Matrix protocol and durable state handling;
+  launched with isolated mode (~-I~) so project modules, inherited
+  ~PYTHONPATH~/~PYTHONSTARTUP~, user site, and environment-provided
+  ~sitecustomize~ cannot run before preview/auth checks
 
 ** Per-Language
 

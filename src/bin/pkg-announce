@@ -1,0 +1,53 @@
+#!/bin/bash
+set -eu
+
+die() {
+    printf 'Error: %s\n' "$*" >&2
+    exit 2
+}
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) ||
+    die "announce must run inside a Git repository."
+metadata="$root/.package.d/announcements.yaml"
+
+if [ ! -e "$metadata" ]; then
+    printf '%s\n' '{"enabled":false,"reason":"no announcement metadata"}'
+    exit 0
+fi
+if [ ! -s "$metadata" ]; then
+    printf '%s\n' '{"enabled":false,"reason":"empty announcement metadata"}'
+    exit 0
+fi
+
+yq_bin=$(command -v yq) || die "announce requires Mike Farah yq v4."
+case "$($yq_bin --version 2>/dev/null)" in
+    *mikefarah*yq*version\ v4.*) ;;
+    *) die "announce requires Mike Farah yq v4." ;;
+esac
+
+tmpdir=$(mktemp -d) || die "announce cannot create a temporary directory."
+cleanup() {
+    rm -rf -- "$tmpdir"
+}
+trap cleanup EXIT HUP INT TERM
+
+if ! "$yq_bin" -o=json '.' "$metadata" > "$tmpdir/project.json" 2>/dev/null; then
+    die "invalid YAML in '$metadata'."
+fi
+
+config_home=${XDG_CONFIG_HOME:-"$HOME/.config"}
+accounts="$config_home/pkg/announcements.yaml"
+
+self_dir=$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")
+trusted_lib=$(realpath -- "$self_dir/../lib") ||
+    die "announce cannot resolve its trusted Python library directory."
+[ -d "$trusted_lib/pkg_announce" ] ||
+    die "announce trusted Python package is missing."
+python3 -I -B -c \
+    'import sys; sys.path.insert(0, sys.argv.pop(1)); from pkg_announce.cli import main; raise SystemExit(main())' \
+    "$trusted_lib" \
+    --project-root "$root" \
+    --project-json "$tmpdir/project.json" \
+    --accounts-yaml "$accounts" \
+    --yq-bin "$yq_bin" \
+    "$@"

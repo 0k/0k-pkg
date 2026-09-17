@@ -1,0 +1,174 @@
+# -*- mode: shell-script -*-
+# shellcheck shell=bash
+# sunit provides the DSL variables and intentionally evaluates quoted commands.
+# shellcheck disable=SC2016,SC2034,SC2115,SC2154
+
+prefix_cmd='
+export PKGCMD_CONFIG_PATH="$base/src/etc/pkgcmd.d"
+export PATH="$test_tmpdir/bin:$PATH"
+export XDG_CONFIG_HOME="$test_tmpdir/config"
+export XDG_STATE_HOME="$test_tmpdir/state"
+cd "$test_tmpdir/project/subdir"
+'
+
+setup() {
+    rm -rf "$test_tmpdir/project" "$test_tmpdir/bin" \
+        "$test_tmpdir/config" "$test_tmpdir/state"
+    mkdir -p "$test_tmpdir/project/subdir" "$test_tmpdir/bin"
+    ln -s "$base/src/bin/pkgcmd" "$test_tmpdir/bin/pkg"
+    cd "$test_tmpdir/project" || return 1
+    git init -q
+    git config user.email test@example.invalid
+    git config user.name Tester
+    printf 'fixture\n' > tracked
+    git add tracked
+    git commit -qm 'new: fixture'
+    git tag 1.0.0
+}
+
+try 'pkg announce check' \
+    "announce_disabled_without_side_effects"
+noerror
+is out '{"enabled":false,"reason":"no announcement metadata"}' TRIM
+
+try '
+mkdir -p ../.package.d
+: > ../.package.d/announcements.yaml
+pkg announce check
+test ! -e "$XDG_STATE_HOME/pkg/announcements"
+' "announce_dispatch_is_dependency_free_and_root_aware"
+noerror
+is out '{"enabled":false,"reason":"empty announcement metadata"}' TRIM
+
+try '
+mkdir -p ../.package.d "$XDG_CONFIG_HOME/pkg"
+printf "null\n" > ../.package.d/announcements.yaml
+printf "SENTINEL_LOCAL_SECRET: [\n" > "$XDG_CONFIG_HOME/pkg/announcements.yaml"
+pkg announce check
+test ! -e "$XDG_STATE_HOME"
+' "null YAML opts out before local credentials"
+noerror
+is out '{"enabled":false,"reason":"null announcement metadata"}' TRIM
+is err ""
+
+try '
+mkdir -p ../.package.d "$XDG_CONFIG_HOME/pkg"
+printf "announcements: []\n" > ../.package.d/announcements.yaml
+printf "SENTINEL_LOCAL_SECRET: [\n" > "$XDG_CONFIG_HOME/pkg/announcements.yaml"
+pkg announce check
+test ! -e "$XDG_STATE_HOME"
+' "empty announcement list opts out before local credentials"
+noerror
+is out '{"enabled":false,"reason":"no announcement targets"}' TRIM
+is err ""
+
+try '
+mkdir -p ../.package.d pkg_announce "$test_tmpdir/hostile-python"
+printf "null\n" > ../.package.d/announcements.yaml
+cat > json.py <<EOF
+import os
+from pathlib import Path
+Path(os.environ["SENTINEL_PATH"]).write_text("project-json")
+raise RuntimeError("hostile project json")
+EOF
+cat > pkg_announce/__init__.py <<EOF
+import os
+from pathlib import Path
+Path(os.environ["SENTINEL_PATH"]).write_text("project-package")
+raise RuntimeError("hostile project package")
+EOF
+cat > "$test_tmpdir/hostile-python/sitecustomize.py" <<EOF
+import os
+from pathlib import Path
+Path(os.environ["SENTINEL_PATH"]).write_text("sitecustomize")
+EOF
+cat > "$test_tmpdir/hostile-python/startup.py" <<EOF
+import os
+from pathlib import Path
+Path(os.environ["SENTINEL_PATH"]).write_text("startup")
+EOF
+SENTINEL_PATH="$test_tmpdir/import-sentinel" \
+PYTHONPATH="$test_tmpdir/hostile-python" \
+PYTHONSTARTUP="$test_tmpdir/hostile-python/startup.py" \
+pkg announce check
+test ! -e "$test_tmpdir/import-sentinel"
+' "announce Python bootstrap ignores hostile project and environment imports"
+noerror
+is out '{"enabled":false,"reason":"null announcement metadata"}' TRIM
+
+try '
+printf "#!/bin/sh\nprintf '\''%%s\\n'\'' \"\$*\"\n" > "$test_tmpdir/bin/pkg-common"
+chmod +x "$test_tmpdir/bin/pkg-common"
+pkg --publish
+' "publish_dispatch_is_unchanged"
+noerror
+is out '--publish' TRIM
+
+try '
+mkdir -p ../.package.d
+cat > ../.package.d/announcements.yaml <<EOF
+announcements:
+  - name: demo
+    transport: matrix
+    room: "#demo:example.invalid"
+    sender: "@bot:example.invalid"
+    language: en
+    audience: users
+    changes-since: last-announcement
+    style: short
+    surprise: rejected
+EOF
+pkg announce check
+' "announce_real_yq_parser"
+is errlvl 2
+is out ""
+is err part "unknown key 'surprise'"
+
+try '
+mkdir -p ../.package.d
+printf "announcements: [\n" > ../.package.d/announcements.yaml
+pkg announce check
+' "malformed YAML is rejected by real yq"
+is errlvl 2
+is out ""
+is err part "invalid YAML"
+
+try '
+mkdir -p ../.package.d "$XDG_CONFIG_HOME/pkg"
+cat > ../.package.d/announcements.yaml <<EOF
+announcements:
+  - name: demo
+    transport: matrix
+    room: "#demo:example.invalid"
+    sender: "@bot:example.invalid"
+    language: en
+    audience: users
+    changes-since: last-announcement
+    style: short
+EOF
+printf "SENTINEL_LOCAL_SECRET: [\n" > "$XDG_CONFIG_HOME/pkg/announcements.yaml"
+pkg announce context --target missing
+' "unknown target precedes malformed local credentials"
+is errlvl 2
+is out ""
+is err "Error: unknown announcement target 'missing'" TRIM
+
+try '
+mkdir -p ../.package.d "$XDG_CONFIG_HOME/pkg"
+cat > ../.package.d/announcements.yaml <<EOF
+announcements:
+  - name: demo
+    transport: matrix
+    room: "#demo:example.invalid"
+    sender: "@bot:example.invalid"
+    language: en
+    audience: users
+    changes-since: last-announcement
+    style: short
+EOF
+printf "SENTINEL_LOCAL_SECRET: [\n" > "$XDG_CONFIG_HOME/pkg/announcements.yaml"
+pkg announce check
+' "malformed local YAML emits a fixed safe diagnostic"
+is errlvl 2
+is out ""
+is err "Error: invalid YAML in local announcement config." TRIM
