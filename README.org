@@ -228,6 +228,11 @@ Checks shipped for the ~all~ package type:
 | ~commit-msg~ | ~20-convention~       | Commit message convention audit                                |
 | ~commit-msg~ | ~90-assisted-by~      | Add ~Assisted-by:~ trailer from ~ai-audit~                     |
 
+The ~*-opencode-*~ hooks only act when the ~$OPENCODE~ environment
+variable is ~1~ (set by the OpenCode agent harness) and are inert
+otherwise.  ~30-org-clock~ needs ~org-cli~ and ~90-assisted-by~
+needs ~ai-audit~; both hooks skip silently when the tool is absent.
+
 ** Source Selection
 
 The ~pkg~ command supports multiple source selection modes:
