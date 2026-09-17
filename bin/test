@@ -1,0 +1,15 @@
+#!/bin/bash
+
+exname="$(basename $0)"
+
+base=$(cd "$(dirname "$0")/.." && pwd)
+
+if ! [ -d "$base/src" ]; then
+    echo "Please execute from project directory or use 'bin/$exname'." >&2
+    exit 1
+fi
+export base
+
+cd "$base/test"
+
+exec sunit "$@"
