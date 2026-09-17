@@ -18,27 +18,7 @@ pkgcmd:t:ts:run() {
 }
 
 
-## ``p`` command -- runs all tests in profile mode, fails at first failure, produce diffable content.
-pkgcmd:p:ts:run() {
-    echo Not Implemented yet
-}
-
-
-## ``pkg`` command -- check code and make package and validate them
-pkgcmd:pkg:ts:run() {
-    pkg-ts "$@"
-}
-
-
-
-## ``stats`` command -- runs linting stats, output diffable content
-pkgcmd:stats:ts:run() {
-    echo Not Implemented yet
-}
-
-
-## ``lint`` command -- runs linting stats, output diffable content
-pkgcmd:lint:ts:run() {
-    echo Not Implemented yet
-}
+## ``pkg`` and ``lint`` are provided by the ``all`` package type
+## (``pkg-common`` and the ``lint/`` hook scripts); the ts-specific
+## parts live in ``release/`` and ``dist/check/`` here.
 

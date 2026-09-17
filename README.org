@@ -26,16 +26,21 @@ workflows regardless of the underlying technology.
 
 * Supported Package Types
 
-| Type     | Detection File        | Build Output      | Registry |
-|----------+-----------------------+-------------------+----------|
-| Cargo    | ~Cargo.toml~          | Rust crate        | crates.io |
-| Hatch    | ~pyproject.toml~ (with hatchling) | wheel, sdist | PyPI |
-| Python   | ~setup.py~            | wheel, sdist      | PyPI |
-| TypeScript | ~tsconfig.json~     | npm package       | npm |
-| JavaScript | ~package.json~      | npm package       | npm |
-| kal-sh   | ~pkg/~ + ~test/test~  | deb package       | - |
-| charm    | ~metadata.yml~        | charm             | - |
-| autogen  | ~autogen.sh~          | tarball           | - |
+| Type       | Detection            | Build / publish        | Extra checks and scripts                 |
+|------------+----------------------+------------------------+------------------------------------------|
+| all        | always               | (drives the pipeline)  | license, debugger, merge markers, ~YYY~, vendored scripts; git hooks |
+| autogen    | ~autogen.sh~         | -                      | package-name check; ~90-prepare.sh~      |
+| cargo      | ~Cargo.toml~         | crate → crates.io      | docs.rs check; clippy/fmt/doc/org lint; ~20-org-to-md.sh~ |
+| hatch      | ~pyproject.toml~ with ~hatchling~ + ~hatch-vcs~ | wheel, sdist → PyPI | pdb/rst checks; ~25-changelog.sh~ |
+| python     | ~setup.py~           | wheel, sdist → PyPI    | pdb/rst checks; flake8 lint; ~25-changelog.sh~ |
+| npm        | ~package.json~       | npm pack → npm         | transpile check                          |
+| ts         | ~tsconfig.json~      | npm pack → npm         | transpile check                          |
+| kal-sh     | ~pkg/~ + ~test/test~ | deb                    | -                                        |
+| charm      | ~metadata.yml~       | -                      | -                                        |
+
+The ~pkg~, ~lint~, ~vendor~ and ~pkg-git-hook~ verbs are implemented
+once, by ~all~; the per-type directories only contribute hook
+scripts.  ~t~ (tests) is implemented per type.
 
 * Installation
 
@@ -82,8 +87,7 @@ for verb in pkg t lint pkg-git-hook; do
 done
 #+end_src
 
-Only ~pkg~, ~t~, ~lint~ and ~pkg-git-hook~ are implemented by the
-shipped package types; ~p~ (profile) and ~stats~ are stubs.
+(~vendor~ is reached as ~pkg vendor~.)
 
 * Usage
 
@@ -175,28 +179,12 @@ t
 t -v   # verbose (if supported by test runner)
 #+end_src
 
-*** ~p~ - Profile Tests
-
-Runs tests in profile mode, producing diffable output.
-
-#+begin_src sh
-p
-#+end_src
-
 *** ~lint~ - Linting
 
 Runs linting checks appropriate for the package type.
 
 #+begin_src sh
 lint
-#+end_src
-
-*** ~stats~ - Statistics
-
-Outputs diffable statistics about the codebase.
-
-#+begin_src sh
-stats
 #+end_src
 
 *** ~pkg-git-hook~ - Global git hooks
@@ -389,11 +377,6 @@ pkgcmd:<type>:is_base() {
 pkgcmd:t:<type>:run() {
     # Run tests
     your-test-command "$@"
-}
-
-pkgcmd:p:<type>:run() {
-    # Profile tests
-    your-test-command --profile "$@"
 }
 
 pkgcmd:pkg-name:<type>:run() {
