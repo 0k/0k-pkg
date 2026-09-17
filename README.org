@@ -107,6 +107,52 @@ pkg --no-tests
 pkg --no-dist
 #+end_src
 
+*** ~pkg vendor~ - Ship build scripts with the project
+
+A fresh ~git clone~ of a project must be buildable without 0k-pkg
+installed: only ~git~, ~sed~, ~date~ and ~grep~ should be needed to
+run ~./autogen.sh~ and then the language's own build tool.  The
+autotools model is followed: 0k-pkg plays the role of ~autoreconf~
+(private, developer-side), and ~autogen.sh~ plus
+~.package.d/autogen.d/*~ play the role of ~configure~ (public,
+committed, self-sufficient).
+
+#+begin_src sh
+pkg vendor           # copy canonical autogen.sh + plugin autogen.d/ scripts
+pkg vendor --dry-run # report what would change
+#+end_src
+
+What gets copied depends on the package types that apply to the
+project (see each plugin's ~autogen.d/~ directory):
+
+| Plugin    | Script                | Purpose                                              |
+|-----------+-----------------------+------------------------------------------------------|
+| ~autogen~ | ~90-prepare.sh~       | ~%%version%%~ substitution in ~$FILES~                |
+| ~cargo~   | ~20-org-to-md.sh~     | ~README.org~ → ~README.md~ (pandoc) + changelog appended, since crates.io only renders the README |
+| ~hatch~   | ~25-changelog.sh~     | ~CHANGELOG.rst~ from git history (gitchangelog)       |
+| ~python~  | ~25-changelog.sh~     | idem                                                  |
+
+Provenance is written to ~.package.d/autogen.d/MANIFEST~ (source
+commit and a sha256 per file).  Commit the vendored files together
+with the manifest.
+
+To keep a local modification of a vendored script, add the line
+~## pkgcmd: local-override~ within its first five lines; ~pkg vendor~
+then leaves it alone.  Scripts that no longer exist upstream are
+removed on the next ~pkg vendor~ unless modified or overridden.
+
+At release time ~all/source/check/vendored~ verifies that every
+vendored file matches its manifest entry (error on drift without
+the override marker, error on a project script silently shadowing a
+plugin one), and warns when 0k-pkg now ships a newer copy: run
+~pkg vendor~, re-test, commit.
+
+Optional tools used by vendored scripts (~pandoc~, ~gitchangelog~)
+are checked with ~depends_soft~: missing, the step is skipped with a
+warning so that ~./autogen.sh~ still succeeds for someone who only
+wants to build.  ~pkg~ exports ~AUTOGEN_STRICT=1~ for the whole
+release pipeline, which turns those into hard errors.
+
 *** ~t~ - Run Tests
 
 Runs the test suite for the detected package type.
@@ -241,7 +287,7 @@ Detection priority is based on load order from:
 1. *Source Preparation*: Clone/copy source to temporary directory
    based on selected source mode
 2. *Sanity Checks*: Run scripts from ~source/check/~ (license,
-   debugger statements, merge markers)
+   debugger statements, merge markers, vendored scripts in sync)
 3. *Tests*: Execute via ~dovis~ across configured platforms
 4. *Coverage*: Aggregate coverage reports if enabled
 5. *Dist Checks*: Run scripts from ~dist/check/~
@@ -260,6 +306,13 @@ in an isolated environment where:
 - Each test run starts from a clean state
 
 Build artifacts are placed in ~/tmp~ by default.
+
+* Testing
+
+#+begin_src sh
+bin/test            # runs the sunit suite in test/
+bin/test vendor     # one file
+#+end_src
 
 * Dependencies
 
@@ -324,6 +377,10 @@ For release workflow integration, create executable scripts in:
 - ~<type>/release/check/~ - Post-build validation
 - ~<type>/release/publish/~ - Publishing commands
 - ~<type>/git-hook/<hook>/~ - Git hook checks run by ~pkg-git-hook~
+- ~<type>/autogen.d/~ - Scripts copied into projects by ~pkg vendor~
+  and sourced by ~./autogen.sh~ (not executed: no shebang, not
+  executable; ~return 1~ aborts the step).  Use ~depends_soft~ for
+  optional tools.
 
 * License
 
