@@ -244,7 +244,7 @@ for my $i (0 .. $#lines) {
         OK TODO FIXME XXX HACK NOTE OpenAI OpenCode ChatGPT WebView WebKit
         PostgreSQL KiB MiB GiB TiB KHz MHz GHz JavaScript TypeScript
         PowerShell JSONPath YAML JSON GitHub GitLab DataFlow OAuth JavaDoc
-        HiDPI FullCalendar SemVer WebSocket
+        HiDPI FullCalendar SemVer WebSocket PyPI
     );
     while ($masked =~ /(?<![`\w])([A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+)(?![`\w])/g) {
         my $tok = $1;
