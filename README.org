@@ -45,8 +45,8 @@ Ensure dependencies are installed:
 # Core dependency
 apt install unionfs-fuse
 
-# For YAML config parsing
-pip install shyaml
+# For YAML config parsing (Rust implementation, not the legacy PyPI one)
+cargo install shyaml-rs
 
 # Per-language dependencies
 cargo install toml-cli   # For Cargo/Hatch packages
@@ -326,12 +326,14 @@ bin/test vendor     # one file
 - ~bash-shlib~ - Shell library framework
 - ~unionfs-fuse~ - Filesystem overlay support
 - ~dovis~ - Cross-platform test runner
+- ~shyaml~ - YAML query tool, from the ~shyaml-rs~ crate
+  (~cargo install shyaml-rs~)
 
 ** Per-Language
 
 | Language   | Dependencies                    |
 |------------+---------------------------------|
-| Cargo/Rust | ~toml-cli~                      |
+| Cargo/Rust | ~toml-cli~, ~pandoc~, ~gitchangelog~ (release only) |
 | Hatch      | ~toml-cli~, ~jq~, ~hatch~       |
 | Python     | ~nosetests~ (if configured)     |
 | npm/TS     | ~jq~, ~npm~                     |
