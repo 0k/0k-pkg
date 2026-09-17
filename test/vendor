@@ -1,0 +1,352 @@
+# -*- mode: shell-script -*-
+##
+## ``pkg vendor`` and the vendored ``autogen.sh`` / ``autogen.d/``
+## scripts: materialisation, manifest, overrides, drift detection,
+## graceful degradation.
+##
+
+exname=$(basename $0)
+
+## Point pkgcmd at the repository copy of the plugins, not at
+## ``~/.pkgcmd.d``, so we test what is committed.  ``pkgcmd.d`` must
+## be a symlink to itself for ``pkg._vendor_autogen_src`` to locate
+## ``share/autogen.sh`` relative to it, exactly as in a real install.
+prefix_cmd='
+export PKGCMD_CONFIG_PATH="$base/src/etc/pkgcmd.d"
+export PATH="$base/src/bin:$PATH"
+pkg() { "$base/src/bin/pkg-common" "$@"; }
+export -f pkg
+cd "$test_tmpdir/proj"
+'
+
+## Runs the vendored check script the way ``pkg`` does: sourced
+## inside a shell where pkgcmd is loaded.
+vendored_check='
+. /etc/shlib
+include pretty
+export VERBOSE=1
+. "$base/src/bin/pkgcmd"
+pkg.load
+export PKGCMD_ALTERNATIVES="$(pkg._list_pkg_alternatives)"
+. "$base/src/etc/pkgcmd.d/all/source/check/vendored"
+'
+
+mk_cargo_project() {
+    rm -rf "$test_tmpdir/proj" "$test_tmpdir/up" "$test_tmpdir/bin"
+    mkdir -p "$test_tmpdir/proj/src" "$test_tmpdir/proj/.package.d"
+    cd "$test_tmpdir/proj"
+    git init -q 2>/dev/null
+    git config user.email "t@example.com"
+    git config user.name "Tester"
+    cat > Cargo.toml <<'EOF'
+[package]
+name = "fx"
+version = "%%version%%"
+edition = "2021"
+EOF
+    echo 'fn main() {}' > src/main.rs
+    printf 'NAME=fx\nAUTHOR=Tester\nEMAIL=t@example.com\nFILES="Cargo.toml"\n' \
+        > .package.d/config
+    cat > README.org <<'EOF'
+* fx
+
+| Field | Description |
+|-------+-------------|
+| ~a~   | first       |
+
+#+begin_src rust :no_run yes
+fn main() {}
+#+end_src
+EOF
+    cat > .gitchangelog.rc <<'EOF'
+ignore_regexps = [r'!minor', r'^([cC]hg|[fF]ix|[nN]ew)\s*:\s*[dD]ev:']
+output_engine = mustache("markdown")
+EOF
+    git add -A
+    git commit -q -m "new: first release"
+    git tag 0.1.0
+    cd - >/dev/null
+}
+
+## A private copy of 0k-pkg's ``src/`` tree (``etc/pkgcmd.d`` +
+## ``share``), laid out like a real install so that
+## ``pkg._vendor_autogen_src`` resolves ``share/autogen.sh`` through
+## the ``pkgcmd.d`` self-symlink.
+mk_upstream_copy() {
+    rm -rf "$test_tmpdir/up"
+    mkdir -p "$test_tmpdir/up/etc" "$test_tmpdir/up/share"
+    cp -a "$base/src/etc/pkgcmd.d" "$test_tmpdir/up/etc/pkgcmd.d"
+    rm -f "$test_tmpdir/up/etc/pkgcmd.d/pkgcmd.d"
+    ln -s "$test_tmpdir/up/etc/pkgcmd.d" "$test_tmpdir/up/etc/pkgcmd.d/pkgcmd.d"
+    cp "$base/src/share/autogen.sh" "$test_tmpdir/up/share/autogen.sh"
+}
+
+mk_hatch_project() {
+    rm -rf "$test_tmpdir/proj" "$test_tmpdir/up" "$test_tmpdir/bin"
+    mkdir -p "$test_tmpdir/proj/.package.d"
+    cd "$test_tmpdir/proj"
+    git init -q 2>/dev/null
+    git config user.email "t@example.com"
+    git config user.name "Tester"
+    cat > pyproject.toml <<'EOF'
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fx"
+version = "%%version%%"
+EOF
+    printf 'NAME=fx\nAUTHOR=Tester\nEMAIL=t@example.com\nFILES="pyproject.toml"\n' \
+        > .package.d/config
+    cat > .gitchangelog.rc <<'EOF'
+ignore_regexps = [r'!minor']
+output_engine = rest_py
+EOF
+    git add -A
+    git commit -q -m "new: first release"
+    git tag 0.1.0
+    cd - >/dev/null
+}
+
+
+##
+## Materialisation
+##
+
+setup() {
+    mk_cargo_project
+}
+
+try 'pkg vendor --dry-run; echo "---"; ls autogen.sh .package.d/autogen.d 2>&1; true' \
+    "dry-run reports without writing"
+is errlvl 0
+is out reg "install +autogen.sh +\(from share\)"
+is out reg "install +\.package\.d/autogen\.d/20-org-to-md\.sh +\(from cargo\)"
+is out reg "install +\.package\.d/autogen\.d/90-prepare\.sh +\(from autogen\)"
+is out part "Dry run: nothing written."
+is out part "No such file or directory"
+
+try 'pkg vendor >/dev/null && cat .package.d/autogen.d/MANIFEST' \
+    "vendor writes manifest with provenance"
+noerror
+is out linereg "^source 0k-pkg [0-9a-f]+$"
+is out linereg "^autogen.sh [0-9a-f]{64} share$"
+is out linereg "^.package.d/autogen.d/20-org-to-md.sh [0-9a-f]{64} cargo$"
+is out linereg "^.package.d/autogen.d/90-prepare.sh [0-9a-f]{64} autogen$"
+
+try 'pkg vendor >/dev/null; [ -x autogen.sh ] && echo exec; [ -x .package.d/autogen.d/90-prepare.sh ] || echo sourced-only' \
+    "autogen.sh executable, autogen.d scripts not"
+noerror
+is out "exec
+sourced-only" TRIM
+
+try 'pkg vendor >/dev/null; cp .package.d/autogen.d/MANIFEST /tmp/m1.$$; pkg vendor; diff /tmp/m1.$$ .package.d/autogen.d/MANIFEST && echo same; rm -f /tmp/m1.$$' \
+    "second vendor is a no-op"
+noerror
+is out part "Already up to date."
+is out part "same"
+is out reg "up-to-date +autogen.sh"
+
+
+##
+## Generated output
+##
+
+try 'pkg vendor >/dev/null && ./autogen.sh >/dev/null && cat README.md' \
+    "org tables become GFM pipe tables"
+noerror
+is out part "| Field | Description |
+|-------|-------------|
+| \`a\`   | first       |"
+
+try 'pkg vendor >/dev/null && ./autogen.sh >/dev/null && cat README.md' \
+    "rust :no_run blocks become rustdoc fences"
+noerror
+is out part '```rust,no_run
+fn main() {}
+```'
+
+try 'pkg vendor >/dev/null && ./autogen.sh >/dev/null && cat README.md' \
+    "changelog appended to README.md"
+noerror
+is out part "# Changelog"
+is out reg "## 0\.1\.0 \([0-9-]+\)"
+is out part "First release."
+
+try 'pkg vendor >/dev/null && ./autogen.sh >/dev/null && grep ^version Cargo.toml' \
+    "version placeholder substituted"
+noerror
+is out 'version = "0.1.0"' TRIM
+
+try 'pkg vendor >/dev/null && ./autogen.sh >/dev/null && ./autogen.sh' \
+    "autogen.sh is idempotent"
+noerror
+is out part "No changes in README.md"
+is out part "Version already set to 0.1.0."
+
+try 'pkg vendor >/dev/null && git add -A && git commit -qm "chg: dev: internal" && ./autogen.sh --get-version' \
+    "dev version uses SemVer prerelease suffix"
+noerror
+is out reg "^0\.1\.0-dev\.[0-9]{12}$" TRIM
+
+
+##
+## Graceful degradation
+##
+
+setup() {
+    mk_cargo_project
+    ## A PATH with the essentials only: no pandoc, no gitchangelog.
+    mkdir -p "$test_tmpdir/bin"
+    for t in git sed date grep tr basename cut diff mktemp rm mv cat awk head sha256sum; do
+        ln -sf "$(command -v $t)" "$test_tmpdir/bin/$t"
+    done
+}
+
+try 'pkg vendor >/dev/null && PATH="$test_tmpdir/bin" ./autogen.sh; echo "errlvl=$?"; grep ^version Cargo.toml; ls README.md 2>&1' \
+    "without pandoc: warns, skips README, still substitutes version"
+is out part "optional tool 'pandoc' not found; skipping."
+is out part "README.md not regenerated"
+is out part "errlvl=0"
+is out part 'version = "0.1.0"'
+is out part "No such file or directory"
+
+try 'pkg vendor >/dev/null && AUTOGEN_STRICT=1 PATH="$test_tmpdir/bin" ./autogen.sh; echo "errlvl=$?"' \
+    "AUTOGEN_STRICT=1 makes pandoc mandatory"
+is out part "couldn't find 'pandoc' (required in strict mode)"
+is out part "..failed !"
+is out part "errlvl=1"
+
+try 'pkg vendor >/dev/null && ln -s "$(command -v pandoc)" "$test_tmpdir/bin/pandoc" && PATH="$test_tmpdir/bin" ./autogen.sh >/dev/null; grep -c Changelog README.md' \
+    "without gitchangelog: README generated, no changelog"
+is errlvl 1
+is out "0" TRIM
+
+
+##
+## Overrides and drift (source check)
+##
+
+setup() {
+    mk_cargo_project
+    (cd "$test_tmpdir/proj" && pkg vendor >/dev/null)
+}
+
+try "$vendored_check" "in-sync project passes the check"
+is errlvl 0
+is out part "'autogen.sh' is in sync (from share)"
+is out part "'.package.d/autogen.d/20-org-to-md.sh' is in sync (from cargo)"
+
+try 'echo "# edited" >> .package.d/autogen.d/20-org-to-md.sh
+'"$vendored_check" "modified vendored file fails the check"
+is errlvl 1
+is out part "'.package.d/autogen.d/20-org-to-md.sh' was modified after vendoring (from cargo)"
+is out part "Add '## pkgcmd: local-override'"
+
+try 'sed -i "2i ## pkgcmd: local-override" .package.d/autogen.d/20-org-to-md.sh
+echo "# edited" >> .package.d/autogen.d/20-org-to-md.sh
+'"$vendored_check" "override marker makes a modified file acceptable"
+is errlvl 0
+is out part "'.package.d/autogen.d/20-org-to-md.sh' is a declared local override."
+
+try 'sed -i "2i ## pkgcmd: local-override" .package.d/autogen.d/20-org-to-md.sh
+pkg vendor' "vendor keeps overrides"
+noerror
+is out reg "override \(kept\) +\.package\.d/autogen\.d/20-org-to-md\.sh"
+
+try 'rm .package.d/autogen.d/90-prepare.sh
+'"$vendored_check" "missing vendored file fails the check"
+is errlvl 1
+is out part "'.package.d/autogen.d/90-prepare.sh' is listed in MANIFEST but missing."
+
+try 'sed -i "s/^\(\.package\.d\/autogen\.d\/20-org-to-md\.sh\) [0-9a-f]*/\1 0000000000000000000000000000000000000000000000000000000000000000/" .package.d/autogen.d/MANIFEST
+sed -i "s/^\(.*\)$/\1/" .package.d/autogen.d/20-org-to-md.sh
+'"$vendored_check" "hash mismatch with manifest is reported as modified"
+is errlvl 1
+is out part "was modified after vendoring"
+
+try 'grep -v "20-org-to-md" .package.d/autogen.d/MANIFEST > m && mv m .package.d/autogen.d/MANIFEST
+'"$vendored_check" "unlisted project script shadowing a plugin one fails"
+is errlvl 1
+is out part "'.package.d/autogen.d/20-org-to-md.sh' shadows the cargo plugin script but is not vendored."
+
+try 'echo "echo custom" > .package.d/autogen.d/50-project-specific.sh
+'"$vendored_check" "project-only scripts are ignored by the check"
+is errlvl 0
+
+try 'rm .package.d/autogen.d/MANIFEST
+'"$vendored_check" "legacy project without manifest only warns"
+is errlvl 0
+is out part "warning: no '.package.d/autogen.d/MANIFEST'"
+
+
+##
+## Upstream update detection
+##
+
+setup() {
+    mk_cargo_project
+    (cd "$test_tmpdir/proj" && pkg vendor >/dev/null)
+    ## Simulate an upstream change by pointing at a modified copy of
+    ## the plugin tree.
+    mk_upstream_copy
+    echo "## newer" >> "$test_tmpdir/up/etc/pkgcmd.d/cargo/autogen.d/20-org-to-md.sh"
+}
+
+upstream_check='
+export PKGCMD_CONFIG_PATH="$test_tmpdir/up/etc/pkgcmd.d"
+'"$vendored_check"
+
+try "$upstream_check" "older vendored copy is a warning, not an error"
+is errlvl 0
+is out part "'.package.d/autogen.d/20-org-to-md.sh' is older than the copy 0k-pkg now provides."
+is out part "run 'pkg vendor', re-test, and commit"
+
+try 'export PKGCMD_CONFIG_PATH="$test_tmpdir/up/etc/pkgcmd.d"
+pkg vendor' "vendor updates the outdated file"
+noerror
+is out reg "update +\.package\.d/autogen\.d/20-org-to-md\.sh +\(from cargo\)"
+is out reg "up-to-date +\.package\.d/autogen\.d/90-prepare\.sh"
+
+
+##
+## Removal of scripts no longer provided
+##
+
+setup() {
+    mk_cargo_project
+    (cd "$test_tmpdir/proj" && pkg vendor >/dev/null)
+    mk_upstream_copy
+    rm "$test_tmpdir/up/etc/pkgcmd.d/cargo/autogen.d/20-org-to-md.sh"
+}
+
+try 'export PKGCMD_CONFIG_PATH="$test_tmpdir/up/etc/pkgcmd.d"
+pkg vendor; ls .package.d/autogen.d/' "unmodified script no longer provided is removed"
+noerror
+is out reg "remove +\.package\.d/autogen\.d/20-org-to-md\.sh +\(no longer provided\)"
+is out part "90-prepare.sh"
+is out part "MANIFEST"
+
+try 'export PKGCMD_CONFIG_PATH="$test_tmpdir/up/etc/pkgcmd.d"
+echo "# edited" >> .package.d/autogen.d/20-org-to-md.sh
+pkg vendor; ls .package.d/autogen.d/' "modified script no longer provided is kept"
+noerror
+is out reg "kept +\.package\.d/autogen\.d/20-org-to-md\.sh +\(modified, no longer provided; not removed\)"
+is out part "20-org-to-md.sh"
+
+
+##
+## Hatch (python) project
+##
+
+setup() {
+    mk_hatch_project
+}
+
+try 'pkg vendor && ./autogen.sh >/dev/null && head -3 CHANGELOG.rst && grep ^version pyproject.toml' \
+    "hatch project gets CHANGELOG.rst and version substitution"
+noerror
+is out reg "install +\.package\.d/autogen\.d/25-changelog\.sh +\(from hatch\)"
+is out part "Changelog"
+is out part 'version = "0.1.0"'
