@@ -290,14 +290,33 @@ Projects can provide local overrides in:
 
 ** Package Detection
 
-When a command is invoked, ~pkgcmd~ walks up the directory tree and
-checks each registered package type's ~applies~ function. The first
-matching type handles the command.
+Package types are not exclusive: several apply to one project at
+the same time and their contributions stack.  On a Rust project
+with an ~autogen.sh~, ~all~, ~autogen~ and ~cargo~ all apply.
 
-Detection priority is based on load order from:
+When a command is invoked, ~pkgcmd~ walks up the directory tree
+until at least one package type's ~applies~ function returns true,
+then:
 
-1. ~\~/.pkgcmd.d/*.sh~ and ~\~/.pkgcmd.d/*/cmd.sh~
-2. Project-local ~.pkgcmd.d/~ directories
+1. *Verb dispatch.*  Among the applying types that implement
+   ~pkgcmd:<verb>:<type>:run~, the first one (alphabetical order
+   of the function table) runs the verb.  ~all~ implements ~pkg~,
+   ~lint~, ~pkg-git-hook~ and ~vendor~; ~cargo~ implements ~t~; and
+   so on.  In practice each verb has one implementation and the
+   choice is unambiguous.
+
+2. *Hook scripts.*  The verb implementation exports
+   ~$PKGCMD_ALTERNATIVES~, the list of *every* applying type, and
+   ~pkg._list_scripts <hook>~ unions the project's
+   ~.package.d/<hook>/*~ with ~<type>/<hook>/*~ for each of those
+   types.  So the release checks, lint scripts, git hooks and
+   ~autogen.d/~ scripts from ~all~, ~autogen~ and ~cargo~ all run,
+   sorted by file name.  ~all~ is therefore not a fallback but the
+   layer shared by every project.
+
+Handlers are loaded from ~\~/.pkgcmd.d/*.sh~ and
+~\~/.pkgcmd.d/*/cmd.sh~, then from any ~.pkgcmd.d/~ found in the
+current directory or its parents.
 
 ** Release Workflow (~pkg~)
 
