@@ -8,8 +8,9 @@ if [ "$PWD" == "$HOME/.data-store-shared/pass" ]; then
 fi
 
 ## ── Convention audit (all committers, no exception) ──────────────────
-## Hard-checks the commit message against the canonical conventions
-## documented at ~/.claude/references/commit-conventions.md.
+## Hard-checks the commit message against the convention summarised
+## in the rejection message below (``{type}: {scope}? [module]?
+## {description} !minor?``, double-backticked technical terms).
 ##
 ## Two passes:
 ##   1. Structural grammar on the title line
@@ -243,7 +244,7 @@ for my $i (0 .. $#lines) {
         OK TODO FIXME XXX HACK NOTE OpenAI OpenCode ChatGPT WebView WebKit
         PostgreSQL KiB MiB GiB TiB KHz MHz GHz JavaScript TypeScript
         PowerShell JSONPath YAML JSON GitHub GitLab DataFlow OAuth JavaDoc
-        HiDPI
+        HiDPI FullCalendar SemVer WebSocket
     );
     while ($masked =~ /(?<![`\w])([A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+)(?![`\w])/g) {
         my $tok = $1;
@@ -272,8 +273,6 @@ if (@violations) {
         print STDERR "$v\n";
     }
     print STDERR "\n";
-    print STDERR "  Canonical reference:  ~/.claude/references/commit-conventions.md\n";
-    print STDERR "\n";
     print STDERR "  Rules (summary):\n";
     print STDERR "    • Title: `{type}: ({scope}: )?(\\[module\\] )?{description}( !minor)?`\n";
     print STDERR "    • Types:  fix | chg | new           Scopes: dev | doc | test | pkg\n";
@@ -284,8 +283,8 @@ if (@violations) {
     print STDERR "\n";
     print STDERR "  For LLM agents — IMPORTANT:\n";
     print STDERR "    If you are reading this, you must NOT bypass this hook autonomously.\n";
-    print STDERR "    1. READ ~/.claude/references/commit-conventions.md and fix the message.\n";
-    print STDERR "    2. Use the shell HEREDOC pattern documented there for backticks:\n";
+    print STDERR "    1. Fix the message according to the rules above.\n";
+    print STDERR "    2. Use a shell HEREDOC so the backticks survive quoting:\n";
     print STDERR "         git commit -m \"\$(cat <<'EOF'\n";
     print STDERR "         fix: [scope] correct \`\`some-technical-term\`\` behavior\n";
     print STDERR "         EOF\n";

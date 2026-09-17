@@ -3,8 +3,8 @@
 ## ── CLOCK-line lint on staged *.org ────────────────────────
 ## Runs ``org-cli clock check`` against the STAGED content of
 ## each *.org file in the commit (not the working-tree version).
-## See ~/.claude/references/clock-format.md for the canonical
-## format and violation taxonomy.
+## ``org-cli`` owns the canonical CLOCK format and the violation
+## taxonomy; this hook only relays its verdict.
 ##
 ## Skipped silently when:
 ##  * no .org files are staged
@@ -38,7 +38,7 @@ if command -v org-cli >/dev/null 2>&1; then
             if [ $check_rc -eq 1 ]; then
                 if [ $clock_failed -eq 0 ]; then
                     echo >&2 "BLOCKED: org-cli clock check found violations on staged *.org files."
-                    echo >&2 "See ~/.claude/references/clock-format.md for the rules."
+                    echo >&2 "Run 'org-cli clock check FILE' for the details."
                     echo >&2 "Bypass with --no-verify if you really must."
                     echo >&2
                 fi
