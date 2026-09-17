@@ -59,6 +59,13 @@ Disable checks:
     --no-cover
     --no-profile
 
+Sub-commands:
+
+    $exname vendor [-n|--dry-run]
+                        Copy 0k-pkg's autogen.sh and the plugins'
+                        autogen.d/ scripts into the project (tracked
+                        in .package.d/autogen.d/MANIFEST).
+
 Others:
 
     --coverage-report
@@ -126,6 +133,18 @@ no_cache=
 allow_publish_off_tags=
 export PKG_COVERAGE=1
 export PKG_PROFILE=1
+## Sub-commands: ``pkg vendor [...]`` runs the ``vendor`` verb of
+## pkgcmd (the same as a ``vendor`` symlink to pkgcmd would).
+case "$1" in
+    vendor)
+        depends pkgcmd
+        . "$(which pkgcmd)" || die "Couldn't load 'pkgcmd'."
+        pkg.load
+        pkg.run "$1" "${@:2}"
+        exit $?
+        ;;
+esac
+
 while [ "$1" ]; do
     previous_args+=("$1")
     case "$1" in
@@ -331,7 +350,7 @@ done
 
 
 
-CONFIG_PATH=~/.pkgcmd.d
+CONFIG_PATH="${PKGCMD_CONFIG_PATH:-$HOME/.pkgcmd.d}"
 
 
 
@@ -345,6 +364,12 @@ CONFIG_PATH=~/.pkgcmd.d
 if [ ! -d .git ]; then
     die "Should be a git repository. (didn't find '.git' dir)"
 fi
+
+## Every ``./autogen.sh`` run by the release pipeline (source checks,
+## builds) must have its optional tools (pandoc, gitchangelog, ...)
+## available: a release artifact with a half-generated README is a
+## bug, whereas a developer's ``git clone && ./autogen.sh`` is not.
+export AUTOGEN_STRICT=1
 
 depends pkgcmd
 
