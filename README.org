@@ -353,8 +353,8 @@ bin/test vendor     # one file
 | Language   | Dependencies                    |
 |------------+---------------------------------|
 | Cargo/Rust | ~toml-cli~, ~pandoc~, ~gitchangelog~ (release only) |
-| Hatch      | ~toml-cli~, ~jq~, ~hatch~       |
-| Python     | ~nosetests~ (if configured)     |
+| Hatch      | ~toml-cli~, ~jq~, ~hatch~, ~docutils~ (rst check), ~gitchangelog~ |
+| Python     | ~docutils~ (rst check), ~flake8~ (lint), ~gitchangelog~, ~nosetests~ (if configured) |
 | npm/TS     | ~jq~, ~npm~                     |
 
 * Extending
