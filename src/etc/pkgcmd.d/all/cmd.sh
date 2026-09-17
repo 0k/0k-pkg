@@ -30,7 +30,6 @@ pkgcmd:pkg:all:run() {
 
 ## ``stats`` command -- runs linting stats, output diffable content
 # pkgcmd:stats:all:run() {
-#     pkg-py "$@"
 # }
 
 

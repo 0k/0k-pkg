@@ -1,0 +1,6 @@
+#!/bin/bash
+## Run flake8 when the project configures it in setup.cfg.
+
+[ -e setup.cfg ] || exit 0
+grep -q '^\[flake8\]' setup.cfg || exit 0
+exec flake8

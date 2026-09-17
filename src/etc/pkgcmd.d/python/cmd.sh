@@ -21,28 +21,7 @@ pkgcmd:t:python:run() {
 }
 
 
-## ``p`` command -- runs all tests in profile mode, fails at first failure, produce diffable content.
-pkgcmd:p:python:run() {
-    echo Not Implemented yet
-}
-
-
-## ``pkg`` command -- check code and make package and validate them
-pkgcmd:pkg:python:run() {
-    pkg-py "$@"
-}
-
-
-## ``stats`` command -- runs linting stats, output diffable content
-pkgcmd:stats:python:run() {
-    pkg-py "$@"
-}
-
-
-## ``lint`` command -- runs linting stats, output diffable content
-pkgcmd:lint:python:run() {
-    [ -e setup.cfg ] &&  egrep '^[flake8]' setup.cfg >/dev/null 2>&1 && {
-          flake8
-    }
-}
+## ``pkg`` and ``lint`` are provided by the ``all`` package type
+## (``pkg-common`` and the ``lint/`` hook scripts); the python-specific
+## parts live in ``release/``, ``source/check/`` and ``lint/`` here.
 

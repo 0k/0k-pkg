@@ -43,7 +43,6 @@ pkgcmd:pkg-version:autogen:run() {
 
 ## ``stats`` command -- runs linting stats, output diffable content
 # pkgcmd:stats:autogen:run() {
-#     pkg-py "$@"
 # }
 
 
