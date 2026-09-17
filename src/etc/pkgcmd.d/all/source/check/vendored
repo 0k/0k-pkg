@@ -1,0 +1,82 @@
+#!/bin/bash
+## -*- mode: shell-script -*-
+##
+## Checks that the build scripts vendored into the project by
+## ``pkg vendor`` (``autogen.sh`` and ``.package.d/autogen.d/*``) are
+## the ones 0k-pkg provides, so that what is committed and what the
+## release pipeline runs cannot silently diverge.
+##
+##   - no MANIFEST                         -> warning (legacy project)
+##   - listed file missing                 -> error
+##   - listed file modified, no override   -> error
+##   - project file shadowing a plugin one -> error
+##   - file older than current plugin copy -> warning (run ``pkg vendor``)
+##
+
+Wrap -v -s -d "Vendored autogen scripts in sync" <<'EOF2' || exit 1
+manifest=.package.d/autogen.d/MANIFEST
+error=0
+if [ ! -f "$manifest" ]; then
+    echo "warning: no '$manifest'; build scripts are not vendored from 0k-pkg." >&2
+    echo "         Run 'pkg vendor' to install and track them." >&2
+    exit 0
+fi
+
+declare -A listed=() current=() provider=()
+candidates=$(mktemp) || exit 1
+trap 'rm -f "$candidates"' EXIT
+pkg._vendor_candidates > "$candidates" || {
+    echo "error: cannot enumerate the scripts 0k-pkg provides." >&2
+    exit 1
+}
+while read-0 rel sha plugin src; do
+    current["$rel"]="$sha"
+    provider["$rel"]="$plugin"
+done < "$candidates"
+
+outdated=
+while read -r rel sha plugin; do
+    [ "$rel" = source ] && continue
+    listed["$rel"]=1
+    if [ ! -f "$rel" ]; then
+        echo "error: '$rel' is listed in MANIFEST but missing." >&2
+        error=1
+        continue
+    fi
+    if pkg._vendor_has_override "$rel"; then
+        echo " info: '$rel' is a declared local override."
+        continue
+    fi
+    actual=$(pkg._vendor_sha "$rel")
+    if [ "$actual" != "$sha" ]; then
+        echo "error: '$rel' was modified after vendoring (from $plugin)." >&2
+        echo "       Add '## pkgcmd: local-override' in its first 5 lines to keep it," >&2
+        echo "       or run 'pkg vendor' to restore it." >&2
+        error=1
+        continue
+    fi
+    if [ "${current[$rel]}" ] && [ "${current[$rel]}" != "$sha" ]; then
+        echo "warning: '$rel' is older than the copy 0k-pkg now provides." >&2
+        outdated=1
+        continue
+    fi
+    echo " info: '$rel' is in sync (from $plugin)."
+done < "$manifest"
+
+## A project script with the same name as a plugin script but not
+## vendored (no MANIFEST entry, no override marker) hides the plugin
+## one without saying so: refuse.
+for rel in "${!current[@]}"; do
+    [ "${listed[$rel]}" ] && continue
+    [ -f "$rel" ] || continue
+    pkg._vendor_has_override "$rel" && continue
+    echo "error: '$rel' shadows the ${provider[$rel]} plugin script but is not vendored." >&2
+    echo "       Run 'pkg vendor' or mark it '## pkgcmd: local-override'." >&2
+    error=1
+done
+
+if [ "$outdated" ]; then
+    echo "warning: run 'pkg vendor', re-test, and commit to pick up updates." >&2
+fi
+exit $error
+EOF2
