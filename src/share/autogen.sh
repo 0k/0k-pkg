@@ -1,9 +1,15 @@
 #!/bin/sh
 
 ##
-## You can download latest version of this file:
-##  $ wget https://gist.github.com/vaab/9118087/raw -O autogen.sh
-##  $ chmod +x autogen.sh
+## Vendored from 0k-pkg (``src/share/autogen.sh``).  Do not edit in
+## place: refresh it with ``pkg vendor`` from a machine where 0k-pkg
+## is installed.  See ``.package.d/autogen.d/MANIFEST`` for provenance.
+##
+## This script is self-sufficient on purpose: a fresh clone only needs
+## ``git``, ``sed``, ``date`` and ``grep`` to run ``./autogen.sh`` and
+## then build the project.  Optional tools (pandoc, gitchangelog, ...)
+## degrade gracefully unless ``AUTOGEN_STRICT=1`` is set, which the
+## release pipeline does.
 ##
 
 ##
@@ -73,6 +79,24 @@ depends() {
     done
 }
 
+## Like ``depends`` but for optional tools: returns 1 (after printing
+## a warning) when a tool is missing, so the calling script can skip
+## the step.  With ``AUTOGEN_STRICT=1`` (set by the release pipeline)
+## a missing tool is fatal, exactly like ``depends``.
+depends_soft() {
+    local __i __path
+    for __i in "$@"; do
+        if ! __path=$(get_path "$__i"); then
+            if [ "$AUTOGEN_STRICT" ]; then
+                die "dependency check: couldn't find '$__i' (required in strict mode)."
+            fi
+            echo "$exname: ${WARNING}warning:${NORMAL} optional tool '$__i' not found; skipping." >&2
+            return 1
+        fi
+    done
+    return 0
+}
+
 die() {
     [ "$*" ] || print_syntax_warning "$FUNCNAME: no arguments."
     [ "$exname" ] || print_exit "$FUNCNAME: 'exname' var is null or not defined." >&2
@@ -100,7 +124,9 @@ get_current_version() {
         echo "$version"
     else
         version=$(echo "$version" | compat_sed "$get_short_tag")
-        echo "${version}.dev$(dev_version_tag)"
+        ## ``-dev.N`` is valid SemVer (cargo) and normalises to
+        ## ``.devN`` under PEP 440 (python).
+        echo "${version}-dev.$(dev_version_tag)"
     fi
 
 }
@@ -108,8 +134,8 @@ get_current_version() {
 get_release_changes() {
     local prev_tag
 
-    prev_tag=$(git describe --tag --abbrev=0 HEAD^)
-    cur_tag=$(git describe --tag --abbrev=0 HEAD)
+    prev_tag=$("$git" describe --tag --abbrev=0 HEAD^)
+    cur_tag=$("$git" describe --tag --abbrev=0 HEAD)
 
     if [ "$prev_tag" = "$cur_tag" ]; then
         die "Error: HEAD and HEAD^ are not on different tags."
@@ -152,20 +178,28 @@ cook() {
 
 
 prepare_files() {
-
+    changed=
     version=$(get_current_version)
     short_version=$(echo "$version" | cut -f 1,2,3 -d ".")
 
     for file in $FILES; do
         if [ -e "$file" ]; then
-            compat_sed_i "s#%%version%%#$version#g;
+            compat_sed "s#%%version%%#$version#g;
                           s#%%short-version%%#${short_version}#g;
                           s#%%name%%#${NAME}#g;
                           s#%%author%%#${AUTHOR}#g;
                           s#%%email%%#${EMAIL}#g;
                           s#%%author-email%%#${AUTHOR_EMAIL}#g;
                           s#%%description%%#${DESCRIPTION}#g" \
-                      "$file"
+                      "$file" > "$file.tmp" &&
+            if diff "$file.tmp" "$file" >/dev/null 2>&1; then
+                echo "No changes in '$file'." >&2
+                rm -f "$file.tmp"
+            else
+                changed=1
+                echo "Updating '$file'." >&2
+                mv "$file.tmp" "$file"
+            fi
         fi
     done
 
@@ -175,7 +209,11 @@ prepare_files() {
         fi
     done
 
-    echo "Version updated to $version."
+    if [ -z "$changed" ]; then
+        echo "Version already set to $version." >&2
+        return 0
+    fi
+    echo "Version updated to $version." >&2
 }
 
 ##
@@ -255,6 +293,14 @@ fi
 ## CODE
 ##
 
+for script in .package.d/autogen.d/*.lib; do
+    [ -e "$script" ] || continue
+    if ! . "$script" 2>&1; then
+        die "Failed to load \`\`$script\`\`."
+        exit 1
+    fi
+done
+
 while [ "$1" ]; do
     case "$1" in
         --get-release-changes) get_release_changes; exit $?;;
@@ -267,13 +313,22 @@ while [ "$1" ]; do
 done
 
 
+## Each script is sourced in a subshell so that a ``return 1`` or a
+## ``die`` inside it aborts that script only.  Its output is captured
+## to a file because in a plain pipeline the exit status would be the
+## one of ``sed``, not of the script.
+autogen_log=$(mktemp) || die "Could not create a temporary file."
+trap 'rm -f "$autogen_log"' EXIT
 for script in .package.d/autogen.d/*.sh; do
     [ -e "$script" ] || continue
     echo "Running \`\`$script\`\`..."
-    if . "$script" 2>&1 | compat_sed 's/^/  | /g'; then
+    ( . "$script" ) > "$autogen_log" 2>&1
+    autogen_status=$?
+    compat_sed 's/^/  | /g' "$autogen_log"
+    if [ "$autogen_status" = 0 ]; then
         echo "  ..done ($script)"
     else
         echo "  ..failed ! ($script)"
-        break
+        exit 1
     fi
 done
