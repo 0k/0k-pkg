@@ -2,7 +2,7 @@
 # -*- mode: shell-script -*-
 
 
-CONFIG_PATH=~/.pkgcmd.d
+CONFIG_PATH="${PKGCMD_CONFIG_PATH:-$HOME/.pkgcmd.d}"
 
 [[ "${BASH_SOURCE[0]}" != "${0}" ]] && SOURCED=true
 
@@ -99,6 +99,21 @@ pkg._list_scripts() {
         [ -f "$script" ] || continue
         [ -x "$script" ] || continue
         p0 "$script"
+    done
+}
+
+## Like ``pkg._list_scripts`` but only for plugin-provided files (not
+## the project's ``.package.d/``), without the executable requirement,
+## and reporting which plugin provides each file.  Emits
+## ``plugin\0path\0`` pairs.  Used by ``pkg vendor`` for
+## ``autogen.d/`` scripts, which are sourced rather than executed.
+pkg._list_plugin_files() {
+    local path="$1" alternative file
+    for alternative in $PKGCMD_ALTERNATIVES; do
+        for file in "$CONFIG_PATH"/"$alternative"/"$path"/*; do
+            [ -f "$file" ] || continue
+            p0 "$alternative" "$file"
+        done
     done
 }
 
