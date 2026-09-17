@@ -53,27 +53,37 @@ cargo install toml-cli   # For Cargo/Hatch packages
 apt install jq           # For npm/Hatch packages
 #+end_src
 
-Install ~0k-pkg~ and its dependencies:
+Install ~0k-pkg~ itself.  Nothing is copied: the clone is the
+installation, and everything else is a symlink into it, so a
+~git pull~ is an upgrade.
 
 #+begin_src sh
-# bash-shlib must be available
+# bash-shlib must be available (provides /etc/shlib)
 # dovis must be installed for testing
 
-# Clone and add to PATH
-git clone <repository-url> ~/0k-pkg
-export PATH="$PATH:$HOME/0k-pkg/src/bin"
+git clone https://github.com/0k/0k-pkg.git ~/dev/sh/0k-pkg   # or wherever you keep sources
 #+end_src
 
-Create symlinks for the command shortcuts:
+Point ~pkgcmd~ at the plugin tree.  ~pkgcmd~ loads its package types
+from ~\~/.pkgcmd.d/~; without this symlink no command is found:
 
 #+begin_src sh
-cd ~/0k-pkg/src/bin
-ln -s pkgcmd t
-ln -s pkgcmd p
-ln -s pkgcmd lint
-ln -s pkgcmd stats
-ln -s pkgcmd pkg
+ln -s ~/dev/sh/0k-pkg/src/etc/pkgcmd.d ~/.pkgcmd.d
 #+end_src
+
+Expose the commands on your ~PATH~.  ~pkgcmd~ dispatches on the
+name it was invoked by (~${0##*/}~), so each verb is a symlink
+named after it, placed in a directory that is already on ~PATH~:
+
+#+begin_src sh
+ln -s ~/dev/sh/0k-pkg/src/bin/pkgcmd ~/.local/bin/pkgcmd
+for verb in pkg t lint pkg-git-hook; do
+    ln -s pkgcmd ~/.local/bin/$verb
+done
+#+end_src
+
+Only ~pkg~, ~t~, ~lint~ and ~pkg-git-hook~ are implemented by the
+shipped package types; ~p~ (profile) and ~stats~ are stubs.
 
 * Usage
 
@@ -265,7 +275,9 @@ The ~pkg~ command supports multiple source selection modes:
 Global configuration is stored in:
 
 - ~\~/.config/pkg/main.yml~ - Main configuration file (YAML format)
-- ~\~/.pkgcmd.d/~ - User-level command handlers
+- ~\~/.pkgcmd.d/~ - Package types and their hook scripts.  Normally
+  a symlink to the clone's ~src/etc/pkgcmd.d~ (see Installation);
+  a real directory holding your own ~<type>/cmd.sh~ works too.
 
 ** Project Configuration
 
