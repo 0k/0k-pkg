@@ -37,6 +37,13 @@ IDENTITY_KEYS = {
     "version", "project", "target", "transport", "homeserver", "room_alias",
     "room_id", "sender", "release", "commit", "content", "body_sha256",
 }
+FORMATTED_CONTENT_KEYS = {"msgtype", "body", "format", "formatted_body"}
+REPLACEMENT_CONTENT_KEYS = FORMATTED_CONTENT_KEYS | {"m.new_content", "m.relates_to"}
+HTML_FORMAT = "org.matrix.custom.html"
+# Pandoc Markdown with every raw-markup passthrough disabled (raw HTML is
+# escaped, unlike the gfm reader which keeps it), single newlines kept as
+# line breaks as Matrix clients display them, and bare URLs linked.
+MARKDOWN_READER = "markdown-raw_html-raw_tex-raw_attribute+hard_line_breaks+autolink_bare_uris"
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40,64}$")
 TXN_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -309,9 +316,97 @@ def read_message(path):
     return raw, body
 
 
-def identity(root, target, account, room_id, release, raw, body):
+def render_markdown(body):
+    """Render the Markdown draft to the HTML Matrix clients display.
+
+    Raw HTML, TeX and attributes in the draft are disabled so they are
+    escaped rather than passed through: the draft cannot inject markup.
+    ``--sandbox`` keeps pandoc from reading files or the network.
+    """
+    try:
+        proc = subprocess.run(
+            ["pandoc", "--sandbox", "-f", MARKDOWN_READER, "-t", "html", "--wrap=none"],
+            input=body.encode("utf-8"), stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, timeout=30, check=False,
+        )
+    except FileNotFoundError:
+        raise UsageError("announcement Markdown rendering requires pandoc") from None
+    except (OSError, subprocess.TimeoutExpired):
+        raise UsageError("pandoc failed to render the announcement Markdown") from None
+    if proc.returncode != 0:
+        raise UsageError("pandoc failed to render the announcement Markdown")
+    try:
+        html = proc.stdout.decode("utf-8").rstrip("\n")
+    except UnicodeDecodeError:
+        raise UsageError("pandoc produced invalid UTF-8") from None
+    if not html:
+        raise UsageError("announcement Markdown rendered to empty HTML")
+    return html
+
+
+def message_content(body):
+    return {
+        "msgtype": "m.text",
+        "body": body,
+        "format": HTML_FORMAT,
+        "formatted_body": render_markdown(body),
+    }
+
+
+def replacement_content(new_content, original_event_id):
+    """Matrix edit (``m.replace``) of ``original_event_id`` with ``new_content``.
+
+    Clients that understand edits show ``m.new_content`` in place of the
+    original message; older clients show the ``* ``-prefixed fallback.
+    """
+    return {
+        "msgtype": "m.text",
+        "body": "* " + new_content["body"],
+        "format": HTML_FORMAT,
+        "formatted_body": "* " + new_content["formatted_body"],
+        "m.new_content": new_content,
+        "m.relates_to": {"rel_type": "m.replace", "event_id": original_event_id},
+    }
+
+
+def valid_content(content, replaces=None):
+    """Accept the announcement content shapes this tool has ever sent.
+
+    Plain (pre-HTML) and formatted messages, and, when ``replaces`` is
+    given, an edit of that event carrying formatted new content.
+    """
+    if not isinstance(content, dict) or content.get("msgtype") != "m.text":
+        return False
+    if not isinstance(content.get("body"), str):
+        return False
+    keys = set(content)
+    if replaces is not None:
+        new_content = content.get("m.new_content")
+        return (
+            keys == REPLACEMENT_CONTENT_KEYS
+            and valid_content(new_content)
+            and set(new_content) == FORMATTED_CONTENT_KEYS
+            and content == replacement_content(new_content, replaces)
+        )
+    if keys == {"msgtype", "body"}:
+        return True
+    return (
+        keys == FORMATTED_CONTENT_KEYS
+        and content.get("format") == HTML_FORMAT
+        and isinstance(content.get("formatted_body"), str)
+    )
+
+
+def announced_body(content):
+    """The announcement text itself, whether sent directly or as an edit."""
+    return content.get("m.new_content", content)["body"]
+
+
+def identity(root, target, account, room_id, release, raw, body, replaces=None):
     commit = release_commit(root, release)
-    content = {"msgtype": "m.text", "body": body}
+    content = message_content(body)
+    if replaces is not None:
+        content = replacement_content(content, replaces)
     value = {
         "version": SCHEMA_VERSION,
         "project": project_id(root),
@@ -326,12 +421,22 @@ def identity(root, target, account, room_id, release, raw, body):
         "content": content,
         "body_sha256": hashlib.sha256(raw).hexdigest(),
     }
+    if replaces is not None:
+        value["replaces"] = replaces
     return value, approval_digest(value)
 
 
 def approval_digest(value):
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def valid_event_id(value):
+    return (
+        isinstance(value, str)
+        and value.startswith("$")
+        and all(0x21 <= ord(character) <= 0x7e for character in value)
+    )
 
 
 def event_permalink(room_id, event_id):
@@ -390,14 +495,15 @@ def validate_receipt(receipt, root, target, account, room_id):
     if receipt.get("receipt_version") != RECEIPT_VERSION or receipt.get("status") != "complete":
         raise ApprovalError("existing announcement receipt has an unsupported version or status")
     identity_value = receipt.get("identity")
-    if not isinstance(identity_value, dict) or set(identity_value) != IDENTITY_KEYS:
+    if not isinstance(identity_value, dict) or set(identity_value) not in (IDENTITY_KEYS, IDENTITY_KEYS | {"replaces"}):
         raise ApprovalError("existing announcement receipt identity is malformed")
+    replaces = identity_value.get("replaces")
+    if "replaces" in identity_value and not valid_event_id(replaces):
+        raise ApprovalError("existing announcement receipt replacement target is malformed")
     content = identity_value.get("content")
-    if not isinstance(content, dict) or set(content) != {"msgtype", "body"}:
+    if not valid_content(content, replaces):
         raise ApprovalError("existing announcement receipt content is malformed")
-    body = content.get("body")
-    if content.get("msgtype") != "m.text" or not isinstance(body, str):
-        raise ApprovalError("existing announcement receipt content is malformed")
+    body = announced_body(content)
     try:
         body_bytes = body.encode("utf-8")
     except UnicodeError:
@@ -432,13 +538,7 @@ def validate_receipt(receipt, root, target, account, room_id):
         raise ApprovalError("existing announcement receipt digest is invalid")
     event_id = receipt.get("event_id")
     timestamp = receipt.get("origin_server_ts")
-    if (
-        not isinstance(event_id, str)
-        or not event_id.startswith("$")
-        or any(ord(character) < 0x21 or ord(character) > 0x7e for character in event_id)
-        or type(timestamp) is not int
-        or timestamp < 0
-    ):
+    if not valid_event_id(event_id) or type(timestamp) is not int or timestamp < 0:
         raise ApprovalError("existing announcement receipt event metadata is malformed")
     if receipt.get("posted_at") != posted_at(timestamp):
         raise ApprovalError("existing announcement receipt timestamp is invalid")
@@ -461,12 +561,46 @@ def command_check(args, root, targets, accounts):
         item = {"target": target["name"], "ready": True, "transport": "matrix", "sender": target["sender"], "room_alias": target["room"], "room_id": room_id}
         if args.draft is not None:
             raw, body = read_message(args.draft)
-            value, digest = identity(root, target, account, room_id, args.release, raw, body)
-            item.update({"preview": {"body": body, "content": value["content"], "sender": target["sender"], "room_alias": target["room"], "room_id": room_id, "release": args.release, "commit": value["commit"], "version": SCHEMA_VERSION}, "approved_sha256": digest})
+            replaces = None
+            if args.replace:
+                replaces = announced_receipt(root, target, account, room_id, args.release, _client)["event_id"]
+            value, digest = identity(root, target, account, room_id, args.release, raw, body, replaces)
+            preview = {"body": body, "content": value["content"], "sender": target["sender"], "room_alias": target["room"], "room_id": room_id, "release": args.release, "commit": value["commit"], "version": SCHEMA_VERSION}
+            if replaces is not None:
+                preview["replaces"] = replaces
+            item.update({"preview": preview, "approved_sha256": digest})
         output.append(item)
     if len(output) == 1 and args.target and args.draft:
         return output[0]
     return {"enabled": True, "targets": output}
+
+
+def announced_receipt(root, target, account, room_id, release, client):
+    """The verified receipt of the original announcement of ``release``.
+
+    ``--replace`` edits target this event: Matrix requires every edit to
+    point at the original message, never at a previous edit.  Edits keep
+    their own receipts, so this receipt is never overwritten.
+    """
+    directory = operation_dir({"project": project_id(root), "target": target["name"], "release": release})
+    receipt = read_json(directory / "complete.json")
+    if receipt is None:
+        raise UsageError(f"no completed announcement for release '{release}' to replace")
+    identity_value = validate_receipt(receipt, root, target, account, room_id)
+    if "replaces" in identity_value:
+        raise ApprovalError("release announcement receipt is unexpectedly an edit")
+    timestamp = verify_event(client.event(room_id, receipt["event_id"]), receipt)
+    if timestamp != receipt["origin_server_ts"]:
+        raise ApprovalError("remote Matrix event timestamp does not match stored evidence")
+    return receipt
+
+
+def replacement_operation_dir(root, target, release, replaces, digest):
+    return operation_dir({
+        "project": project_id(root),
+        "target": target["name"],
+        "release": f"{release}\0replace\0{replaces}\0{digest}",
+    })
 
 
 def command_send(args, root, targets, accounts):
@@ -474,12 +608,25 @@ def command_send(args, root, targets, accounts):
     account = account_for(accounts, target["sender"])
     token = credential(account)
     raw, body = read_message(args.message)
-    operation_identity = {
+    release_identity = {
         "project": project_id(root),
         "target": target["name"],
         "release": args.release,
     }
-    directory = operation_dir(operation_identity)
+    release_dir = operation_dir(release_identity)
+    replaces = None
+    if args.replace:
+        # The edit is its own durable, retry-safe operation keyed by the
+        # edited event and the approved digest; the release's receipt is
+        # only read to find the event to edit.
+        client = MatrixClient(account["homeserver"], token)
+        room_id = client.readiness(target["sender"], target["room"])
+        with operation_lock(release_dir / "operation.lock"):
+            replaces = announced_receipt(root, target, account, room_id, args.release, client)["event_id"]
+        _, digest = identity(root, target, account, room_id, args.release, raw, body, replaces)
+        directory = replacement_operation_dir(root, target, args.release, replaces, digest)
+    else:
+        directory = release_dir
     with operation_lock(directory / "operation.lock"):
         complete_path = directory / "complete.json"
         pending_path = directory / "pending.json"
@@ -490,7 +637,7 @@ def command_send(args, root, targets, accounts):
             raise ApprovalError("Matrix credential changed while an announcement outcome is pending")
         client = MatrixClient(account["homeserver"], token)
         room_id = client.readiness(target["sender"], target["room"])
-        value, digest = identity(root, target, account, room_id, args.release, raw, body)
+        value, digest = identity(root, target, account, room_id, args.release, raw, body, replaces)
         if digest != args.approved_sha256:
             raise ApprovalError("approved digest does not match current announcement identity or content")
         if complete is not None:
@@ -613,6 +760,11 @@ def parser():
     send.add_argument("--message", required=True)
     send.add_argument("--release", required=True)
     send.add_argument("--approved-sha256", required=True)
+    for command in (check, send):
+        command.add_argument(
+            "--replace", action="store_true",
+            help="edit the release's existing announcement instead of posting a new one",
+        )
     return result
 
 
@@ -630,6 +782,8 @@ def main():
             target_by_name(targets, args.target)
             if (args.draft is None) != (args.release is None):
                 raise UsageError("--draft and --release must be used together")
+            if args.replace and (args.draft is None or args.target is None):
+                raise UsageError("--replace requires --target, --draft and --release")
         else:
             target_by_name(targets, args.target, required=True)
         accounts = load_accounts_yaml(args.accounts_yaml, args.yq_bin)

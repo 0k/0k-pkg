@@ -583,6 +583,128 @@ class AnnounceTest(unittest.TestCase):
         self.assertEqual(0o755, pkg_dir.stat().st_mode & 0o777)
         self.assertEqual(0o700, (pkg_dir / "announcements").stat().st_mode & 0o777)
 
+    # ── Markdown rendering ──────────────────────────────────────────
+
+    def test_markdown_draft_is_sent_with_its_html_rendering(self):
+        self.message.write_text("**Bold** and `code`\n\n- one\n- two\n\n📦 https://e.invalid/x\n🔧 line\n")
+        preview = self.preview()
+        self.send(preview["approved_sha256"])
+        self.assertEqual(
+            {
+                "msgtype": "m.text",
+                "body": self.message.read_text(),
+                "format": "org.matrix.custom.html",
+                "formatted_body": (
+                    "<p><strong>Bold</strong> and <code>code</code></p>\n"
+                    "<ul>\n<li>one</li>\n<li>two</li>\n</ul>\n"
+                    '<p>📦 <a href="https://e.invalid/x" class="uri">https://e.invalid/x</a><br />\n'
+                    "🔧 line</p>"
+                ),
+            },
+            self.matrix.puts[0][2],
+        )
+        self.assertEqual(self.matrix.puts[0][2], preview["preview"]["content"])
+
+    def test_raw_html_in_draft_is_escaped_not_injected(self):
+        self.message.write_text("<img src=x onerror=alert(1)> <b>x</b>\n")
+        preview = self.preview()
+        self.assertEqual(
+            "<p>&lt;img src=x onerror=alert(1)&gt; &lt;b&gt;x&lt;/b&gt;</p>",
+            preview["preview"]["content"]["formatted_body"],
+        )
+
+    def test_missing_pandoc_fails_before_any_matrix_write(self):
+        bin_dir = Path(self.temp.name) / "no-pandoc-bin"
+        bin_dir.mkdir()
+        for tool in ("git", "yq", "python3", "bash", "dirname", "realpath", "mktemp", "rm"):
+            found = subprocess.run(["bash", "-c", f"command -v {tool}"], text=True, stdout=subprocess.PIPE).stdout.strip()
+            if found:
+                (bin_dir / tool).symlink_to(found)
+        env_path = os.environ["PATH"]
+        os.environ["PATH"] = str(bin_dir)
+        try:
+            proc, _ = self.invoke("check", "--target", "demo", "--draft", self.message, "--release", "1.0.0", expect=2)
+        finally:
+            os.environ["PATH"] = env_path
+        self.assertEqual("Error: announcement Markdown rendering requires pandoc\n", proc.stderr)
+        self.assertEqual([], self.matrix.puts)
+
+    def test_receipt_written_before_html_support_still_validates(self):
+        _, receipt = self.send(self.preview()["approved_sha256"])
+        legacy = json.loads(json.dumps(receipt))
+        legacy["identity"]["content"] = {"msgtype": "m.text", "body": receipt["identity"]["content"]["body"]}
+        encoded = json.dumps(legacy["identity"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        legacy["digest"] = hashlib.sha256(encoded.encode()).hexdigest()
+        self.matrix.events[legacy["event_id"]]["content"] = legacy["identity"]["content"]
+        next(self.state.rglob("complete.json")).write_text(json.dumps(legacy))
+        _, context = self.invoke("context", "--target", "demo")
+        self.assertEqual(("receipt", legacy["event_id"]), (context["source"], context["announcement"]["event_id"]))
+
+    # ── --replace ──────────────────────────────────────────────────
+
+    def replace_preview(self, expect=0):
+        return self.invoke("check", "--target", "demo", "--draft", self.message,
+                           "--release", "1.0.0", "--replace", expect=expect)
+
+    def replace_send(self, digest, expect=0):
+        return self.invoke("send", "--target", "demo", "--message", self.message,
+                           "--release", "1.0.0", "--approved-sha256", digest,
+                           "--replace", expect=expect)
+
+    def test_replace_edits_the_original_announcement_in_place(self):
+        original_preview = self.preview()
+        _, original = self.send(original_preview["approved_sha256"])
+        self.message.write_text("Corrected **body**\n")
+        _, preview = self.replace_preview()
+        self.assertEqual(original["event_id"], preview["preview"]["replaces"])
+        _, receipt = self.replace_send(preview["approved_sha256"])
+        self.assertEqual(
+            {
+                "msgtype": "m.text",
+                "body": "* Corrected **body**\n",
+                "format": "org.matrix.custom.html",
+                "formatted_body": "* <p>Corrected <strong>body</strong></p>",
+                "m.new_content": {
+                    "msgtype": "m.text",
+                    "body": "Corrected **body**\n",
+                    "format": "org.matrix.custom.html",
+                    "formatted_body": "<p>Corrected <strong>body</strong></p>",
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": original["event_id"]},
+            },
+            self.matrix.puts[-1][2],
+        )
+        self.assertEqual(("complete", original["event_id"]), (receipt["status"], receipt["identity"]["replaces"]))
+        # The release's original receipt is left as it was.
+        self.message.write_text("Release exact body\n")
+        _, replay = self.send(original_preview["approved_sha256"])
+        self.assertEqual(original, replay)
+
+    def test_replace_is_retry_safe_and_every_edit_targets_the_original(self):
+        _, original = self.send(self.preview()["approved_sha256"])
+        self.message.write_text("First fix\n")
+        _, first = self.replace_preview()
+        self.replace_send(first["approved_sha256"])
+        self.replace_send(first["approved_sha256"])
+        self.assertEqual(2, len(self.matrix.puts))
+        self.message.write_text("Second fix\n")
+        _, second = self.replace_preview()
+        self.replace_send(second["approved_sha256"])
+        self.assertEqual(3, len(self.matrix.puts))
+        self.assertEqual(original["event_id"], self.matrix.puts[-1][2]["m.relates_to"]["event_id"])
+
+    def test_plain_approval_cannot_authorize_an_edit(self):
+        self.send(self.preview()["approved_sha256"])
+        self.message.write_text("Fix\n")
+        proc, _ = self.replace_send(self.preview()["approved_sha256"], expect=4)
+        self.assertIn("approved digest does not match", proc.stderr)
+        self.assertEqual(1, len(self.matrix.puts))
+
+    def test_replace_without_announcement_refuses(self):
+        proc, _ = self.replace_preview(expect=2)
+        self.assertEqual("Error: no completed announcement for release '1.0.0' to replace\n", proc.stderr)
+        self.assertEqual([], self.matrix.puts)
+
 
 if __name__ == "__main__":
     unittest.main()

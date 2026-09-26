@@ -54,9 +54,10 @@ apt install unionfs-fuse
 # For release-pipeline YAML config parsing (Rust implementation, not the legacy PyPI one)
 cargo install shyaml-rs
 
-# For announcement metadata (Mike Farah yq v4, plus Python 3 stdlib)
+# For announcements (Mike Farah yq v4, pandoc for Markdown, plus Python 3 stdlib)
 # Install yq using your platform's package/install method.
 yq --version
+pandoc --version
 
 # Per-language dependencies
 cargo install toml-cli   # For Cargo/Hatch packages
@@ -192,27 +193,52 @@ pkg announce context --target community
 # Send the exact file/version/destination approved in the preview
 pkg announce send --target community --message /tmp/release.txt \
   --release 1.2.3 --approved-sha256 DIGEST_FROM_CHECK
+
+# Correct a release's announcement in place (Matrix edit), same two steps
+pkg announce check --target community --draft /tmp/fixed.txt --release 1.2.3 --replace
+pkg announce send --target community --message /tmp/fixed.txt \
+  --release 1.2.3 --approved-sha256 DIGEST_FROM_CHECK --replace
 #+end_src
 
 All successful commands write JSON data to stdout.  Diagnostics and errors
 go to stderr.  ~check~ and ~context~ use Matrix GET requests only.  Supplying
 ~--draft~ to ~check~ does not write a receipt and cannot send a message.
 
-The preview displays the full message body, sender, configured alias,
-resolved room ID, release tag, full dereferenced commit, digest version, and
-approval digest.  The versioned digest binds those values to the stable
-project identifier (canonical ~origin~ URL when available, otherwise the
-documented ~local:/absolute/repository/path~ fallback), normalized
-homeserver, target/transport, and exact UTF-8 file bytes represented as plain
-Matrix ~m.text~ content.  No newline or whitespace normalization is applied.
-Moving a tag, editing the file, retargeting an alias, changing sender, or
-changing homeserver invalidates approval.
+The draft is Markdown.  It is sent as Matrix ~m.text~ with the Markdown
+source as ~body~ (what clients without HTML support display) and its
+~pandoc~ rendering as ~formatted_body~ (~format: org.matrix.custom.html~).
+Pandoc runs in ~--sandbox~ mode with raw HTML, raw TeX and raw attributes
+disabled, so markup typed in the draft is escaped rather than injected;
+single newlines are kept as line breaks and bare URLs become links.  A
+missing or failing ~pandoc~ aborts before anything is sent.
+
+The preview displays the full message body and the exact Matrix content
+(including the rendered HTML), sender, configured alias, resolved room ID,
+release tag, full dereferenced commit, digest version, and approval digest.
+The versioned digest binds those values to the stable project identifier
+(canonical ~origin~ URL when available, otherwise the documented
+~local:/absolute/repository/path~ fallback), normalized homeserver,
+target/transport, the exact UTF-8 file bytes, and the exact content sent, so
+a change in the rendered HTML also invalidates approval.  No newline or
+whitespace normalization is applied.  Moving a tag, editing the file,
+retargeting an alias, changing sender, or changing homeserver invalidates
+approval.  Receipts written before HTML rendering existed (plain ~m.text~
+content) remain valid.
+
+~--replace~ edits the release's existing announcement instead of posting a
+second one: the content is a Matrix ~m.replace~ edit of the original
+announcement event (clients show the new text in place of the old one).
+It requires a verified completed announcement for that release, and every
+edit targets the original event, never a previous edit.  The edited event is
+part of the approval digest, so a preview made without ~--replace~ cannot
+authorize an edit.  Each edit is its own durable, retry-safe operation with
+its own receipt; the original announcement's receipt is never modified.
 
 Before sending, the command verifies the credential's exact Matrix user,
 alias resolution, joined membership, effective ~m.room.message~ power level,
-and that the room is unencrypted.  It never joins, renames, logs in, obtains
-admin credentials, or sends formatted HTML.  Redirects are not followed, so
-an authorization header cannot cross hosts.
+and that the room is unencrypted.  It never joins, renames, logs in, or
+obtains admin credentials.  Redirects are not followed, so an authorization
+header cannot cross hosts.
 
 Sending is durable and retry-safe.  Private evidence under
 ~$XDG_STATE_HOME/pkg/announcements/~ records a stable random Matrix
@@ -494,6 +520,7 @@ bin/test vendor     # one file
 - ~shyaml~ - YAML query tool, from the ~shyaml-rs~ crate
   (~cargo install shyaml-rs~)
 - Mike Farah ~yq~ v4 - strict announcement YAML-to-JSON parsing
+- ~pandoc~ - Markdown-to-HTML rendering of announcement drafts
 - Python 3.8+ - standard-library Matrix protocol and durable state handling;
   launched with isolated mode (~-I~) so project modules, inherited
   ~PYTHONPATH~/~PYTHONSTARTUP~, user site, and environment-provided
