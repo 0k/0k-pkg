@@ -1,0 +1,42 @@
+# -*- mode: shell-script -*-
+# shellcheck shell=bash
+# sunit provides the DSL variables and intentionally evaluates quoted commands.
+# shellcheck disable=SC2016,SC2034,SC2154
+
+## ``git-hook/commit-msg/20-convention``: title grammar of a commit
+## message.  Each case writes the message to a file and runs the
+## repository copy of the hook on it, as git does.
+
+prefix_cmd='
+hook="$base/src/etc/pkgcmd.d/all/git-hook/commit-msg/20-convention"
+check() { printf "%s\n" "$@" > "$test_tmpdir/msg"; "$hook" "$test_tmpdir/msg"; }
+'
+
+
+## Colon in the description
+
+try 'check "new: pi-server: let vigil pick the model"' \
+    "a word-colon after the type is rejected, not read as description"
+is errlvl 1
+is err part "[L1] TITLE-DESC"
+is err part "offending: «new: pi-server: let vigil pick the model»"
+
+try 'check "new: [identity] wire auth: accept device certificates"' \
+    "a label-colon inside the description is rejected"
+is errlvl 1
+is err part "[L1] TITLE-DESC"
+
+try 'check "$(cat <<'"'"'EOF'"'"'
+fix: [api] quote ``mode: fast`` in the bind error
+EOF
+)"' \
+    "a colon-space inside double backticks is accepted"
+noerror
+
+try 'check "chg: [clock] round entries ending at 12:30 down"' \
+    "a colon not followed by a space is accepted"
+noerror
+
+try 'check "fix: doc: explain the release steps" "" "Why: the old steps were stale."' \
+    "a known scope and a colon in the body are accepted"
+noerror

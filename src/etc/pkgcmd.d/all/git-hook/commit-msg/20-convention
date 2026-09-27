@@ -156,6 +156,19 @@ if ($title !~ /^(fix|chg|new):/) {
             $title);
     }
 
+    ## No word ending in ':' followed by a space (or ending the title)
+    ## in the description, outside double-backticks.  The only such
+    ## colons a title may hold are the type's and the scope's; one here
+    ## is either a scope that is not dev/doc/test/pkg (e.g.
+    ## ``new: pi-server: ...`` — a module goes in [brackets]) or a
+    ## ``label: detail`` title (state the change as one imperative
+    ## phrase instead).  A colon inside a token (``12:30``) is fine.
+    if ($desc_masked =~ /(\S+:)(?:\s|$)/) {
+        add_violation(1, 'TITLE-DESC',
+            "description must not contain `$1` followed by a space — a module goes in [brackets] (only dev, doc, test, pkg are scopes), and a title is one imperative phrase, not `label: detail`",
+            $title);
+    }
+
     ## Title length <= 96 chars (per convention doc)
     if (length($title) > 96) {
         add_violation(1, 'TITLE-LEN',
