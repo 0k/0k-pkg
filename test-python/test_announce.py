@@ -162,7 +162,7 @@ class AnnounceTest(unittest.TestCase):
         subprocess.run(["git", "config", "user.name", "Tester"], cwd=self.root, check=True)
         (self.root / "tracked").write_text("fixture\n")
         subprocess.run(["git", "add", "tracked"], cwd=self.root, check=True)
-        subprocess.run(["git", "commit", "-qm", "new: fixture"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "new: add fixture"], cwd=self.root, check=True)
         subprocess.run(["git", "tag", "1.0.0"], cwd=self.root, check=True)
         self.matrix = MatrixFixture()
         self.config = Path(self.temp.name) / "config"
@@ -362,7 +362,7 @@ class AnnounceTest(unittest.TestCase):
         preview = self.preview()
         (self.root / "second").write_text("second\n")
         subprocess.run(["git", "add", "second"], cwd=self.root, check=True)
-        subprocess.run(["git", "commit", "-qm", "chg: second"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "chg: add second change"], cwd=self.root, check=True)
         subprocess.run(["git", "tag", "-f", "1.0.0"], cwd=self.root, check=True,
                        stdout=subprocess.DEVNULL)
         self.send(preview["approved_sha256"], expect=4)
@@ -474,7 +474,7 @@ class AnnounceTest(unittest.TestCase):
         (other / ".package.d").mkdir()
         (other / ".package.d" / "announcements.yaml").write_text((self.root / ".package.d" / "announcements.yaml").read_text())
         subprocess.run(["git", "add", "."], cwd=other, check=True)
-        subprocess.run(["git", "commit", "-qm", "new: other"], cwd=other, check=True)
+        subprocess.run(["git", "commit", "-qm", "new: add other"], cwd=other, check=True)
         subprocess.run(["git", "tag", "1.0.0"], cwd=other, check=True)
         _, context = self.invoke("context", "--target", "demo", cwd=other)
         self.assertEqual("room-fallback", context["source"])

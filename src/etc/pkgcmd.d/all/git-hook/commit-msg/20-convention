@@ -26,6 +26,11 @@ fi
 ## --no-verify without explicit user approval obtained via an MCP
 ## Question — see the error message below.
 
+## Resolve symlinks: the hook is usually reached through
+## ``~/.pkgcmd.d``, its data files live next to the real script.
+COMMIT_MSG_DATA_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+export COMMIT_MSG_DATA_DIR
+
 perl - "$msg_file" <<'PERL_AUDIT'
 use strict;
 use warnings;
@@ -63,6 +68,44 @@ if ($lines[0] =~ /^(?:fixup|squash|amend)!\s/) {
 }
 
 my @violations;
+
+## Set when the title starts with a genuine base-form verb that is
+## simply not listed yet; enables footer rule 5.
+my $unlisted_verb;
+
+## Data files shipped next to this hook.
+my $data_dir = $ENV{COMMIT_MSG_DATA_DIR}
+    or die "commit-msg: COMMIT_MSG_DATA_DIR is not set\n";
+
+## Lines of a word list, without comments and blank lines.
+sub read_word_list {
+    my ($path) = @_;
+    open my $wfh, '<', $path or die "commit-msg: cannot read $path: $!\n";
+    my @words = grep { length } map { s/#.*//; s/^\s+|\s+$//g; lc } <$wfh>;
+    close $wfh;
+    return @words;
+}
+
+## Base verb of a verb form, from ``base<TAB>form<TAB>features`` lines:
+## the word itself when it is a base form (``V;NFIN``), its base when
+## it is an inflected form (``added`` -> ``add``), undef when the word
+## is no known verb form.  A base-form reading wins over an inflected
+## one (``found`` is both ``find``'s past and a verb of its own).
+sub base_verb_of {
+    my ($word, $path) = @_;
+    open my $ffh, '<', $path or die "commit-msg: cannot read $path: $!\n";
+    my $inflected_of;
+    while (my $line = <$ffh>) {
+        next if $line =~ /^#/;
+        chomp $line;
+        my ($base, $form, $feat) = split /\t/, $line;
+        next unless defined $feat && $feat =~ /^V;/ && lc $form eq $word;
+        if ($feat eq 'V;NFIN') { close $ffh; return $word; }
+        $inflected_of //= lc $base;
+    }
+    close $ffh;
+    return $inflected_of;
+}
 
 sub add_violation {
     my ($lineno, $tag, $detail, $offender) = @_;
@@ -169,6 +212,38 @@ if ($title !~ /^(fix|chg|new):/) {
             $title);
     }
 
+    ## First word of the description: an imperative verb listed in
+    ## ``verbs.txt``.  Otherwise, in this order:
+    ##   - reviewed and refused (``not-verbs.txt``): rewrite the title;
+    ##   - inflected verb form (``added``): write its base verb;
+    ##   - base-form verb absent from the list: it may be listed, but
+    ##     only with the user's approval (footer rule 5);
+    ##   - anything else: not a verb, rewrite the title.
+    my ($first) = $desc =~ /^\s*(\S+)/;
+    if (defined $first) {
+        my $word = lc $first;
+        $word =~ s/[,;]$//;
+        my %verbs = map { $_ => 1 } read_word_list("$data_dir/verbs.txt");
+        if (!$verbs{$word}) {
+            my %refused = map { $_ => 1 } read_word_list("$data_dir/not-verbs.txt");
+            my $base = $refused{$word}
+                ? undef
+                : base_verb_of($word, "$data_dir/verb-forms.tsv");
+            my $hint;
+            if (defined $base && $base ne $word) {
+                $hint = "`$first` is a form of `$base`: write `$base`";
+            } elsif (defined $base) {
+                $hint = "`$first` is a base-form verb missing from $data_dir/verbs.txt (see rule 5 below)";
+                $unlisted_verb = $word;
+            } else {
+                $hint = "`$first` is not a verb: start the title with the action it performs";
+            }
+            add_violation(1, 'TITLE-VERB',
+                "description must start with an imperative verb; $hint",
+                $title);
+        }
+    }
+
     ## Title length <= 96 chars (per convention doc)
     if (length($title) > 96) {
         add_violation(1, 'TITLE-LEN',
@@ -257,7 +332,7 @@ for my $i (0 .. $#lines) {
         OK TODO FIXME XXX HACK NOTE OpenAI OpenCode ChatGPT WebView WebKit
         PostgreSQL KiB MiB GiB TiB KHz MHz GHz JavaScript TypeScript
         PowerShell JSONPath YAML JSON GitHub GitLab DataFlow OAuth JavaDoc
-        HiDPI FullCalendar SemVer WebSocket PyPI OpenCV GrabCut
+        HiDPI FullCalendar SemVer WebSocket PyPI OpenCV GrabCut UniMorph
     );
     while ($masked =~ /(?<![`\w])([A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+)(?![`\w])/g) {
         my $tok = $1;
@@ -313,6 +388,16 @@ if (@violations) {
     print STDERR "       with its own convention), you must ASK THE USER VIA THE MCP\n";
     print STDERR "       `Question` TOOL for explicit approval to use `git commit --no-verify`.\n";
     print STDERR "       Never bypass without that explicit approval.\n";
+    if (defined $unlisted_verb) {
+        print STDERR "    5. If TITLE-VERB says a base-form verb is missing from verbs.txt and\n";
+        print STDERR "       `$unlisted_verb` is the right imperative for this change,\n";
+        print STDERR "       ask the user via the MCP `Question` tool whether to add it to\n";
+        print STDERR "       $data_dir/verbs.txt\n";
+        print STDERR "       (one lowercase base form per line, sorted).  Add it only after\n";
+        print STDERR "       approval, then retry the same message.  If the user refuses, add\n";
+        print STDERR "       it to not-verbs.txt next to it and rewrite the title.\n";
+        print STDERR "       Do not swap it for a weaker listed verb, and do not bypass the hook.\n";
+    }
     exit 1;
 }
 

@@ -63,7 +63,7 @@ ignore_regexps = [r'!minor', r'^([cC]hg|[fF]ix|[nN]ew)\s*:\s*[dD]ev:']
 output_engine = mustache("markdown")
 EOF
     git add -A
-    git commit -q -m "new: first release"
+    git commit -q -m "new: ship first release"
     git tag 0.1.0
     cd - >/dev/null
 }
@@ -104,7 +104,7 @@ ignore_regexps = [r'!minor']
 output_engine = rest_py
 EOF
     git add -A
-    git commit -q -m "new: first release"
+    git commit -q -m "new: ship first release"
     git tag 0.1.0
     cd - >/dev/null
 }
@@ -172,7 +172,7 @@ try 'pkg vendor >/dev/null && ./autogen.sh >/dev/null && cat README.md' \
 noerror
 is out part "# Changelog"
 is out reg "## 0\.1\.0 \([0-9-]+\)"
-is out part "First release."
+is out part "Ship first release."
 
 try 'pkg vendor >/dev/null && ./autogen.sh >/dev/null && grep ^version Cargo.toml' \
     "version placeholder substituted"
@@ -185,7 +185,7 @@ noerror
 is out part "No changes in README.md"
 is out part "Version already set to 0.1.0."
 
-try 'pkg vendor >/dev/null && git add -A && git commit -qm "chg: dev: internal" && ./autogen.sh --get-version' \
+try 'pkg vendor >/dev/null && git add -A && git commit -qm "chg: dev: tidy internals" && ./autogen.sh --get-version' \
     "dev version uses SemVer prerelease suffix"
 noerror
 is out reg "^0\.1\.0-dev\.[0-9]{12}$" TRIM

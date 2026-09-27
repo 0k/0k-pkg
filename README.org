@@ -311,6 +311,16 @@ Checks shipped for the ~all~ package type:
 | ~commit-msg~ | ~20-convention~       | Commit message convention audit                                |
 | ~commit-msg~ | ~90-assisted-by~      | Add ~Assisted-by:~ trailer from ~ai-audit~                     |
 
+~20-convention~ requires the first word of a title's description to
+be an imperative verb listed in ~git-hook/commit-msg/verbs.txt~ (one
+base form per line, British and American spellings both accepted).
+When an inflected form is used (~added~, ~using~), it names the base
+verb to write instead, looked up in ~verb-forms.tsv~ (UniMorph
+English, CC BY-SA 3.0).  A genuine base-form verb that is not listed
+yet is rejected with an instruction to ask the user before adding it
+to ~verbs.txt~; words reviewed and refused live in ~not-verbs.txt~
+and are reported as "not a verb".
+
 The ~*-opencode-*~ hooks only act when the ~$OPENCODE~ environment
 variable is ~1~ (set by the OpenCode agent harness) and are inert
 otherwise.  ~30-org-clock~ needs ~org-cli~ and ~90-assisted-by~

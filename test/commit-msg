@@ -33,10 +33,57 @@ EOF
     "a colon-space inside double backticks is accepted"
 noerror
 
-try 'check "chg: [clock] round entries ending at 12:30 down"' \
+try 'check "chg: [clock] shorten entries ending at 12:30"' \
     "a colon not followed by a space is accepted"
 noerror
 
 try 'check "fix: doc: explain the release steps" "" "Why: the old steps were stale."' \
     "a known scope and a colon in the body are accepted"
+noerror
+
+
+## First word of the description: an imperative verb from ``verbs.txt``
+
+try 'check "new: [git-hook] Add a verb check"' \
+    "a listed verb is accepted, whatever its case"
+noerror
+
+try 'check "fix: [git-hook] added a verb check"' \
+    "a past tense is rejected and the base verb is suggested"
+is errlvl 1
+is err part "[L1] TITLE-VERB: description must start with an imperative verb; \`added\` is a form of \`add\`: write \`add\`"
+
+try 'check "chg: [git-hook] using the new verb list"' \
+    "a present participle is rejected and the base verb is suggested"
+is errlvl 1
+is err part "\`using\` is a form of \`use\`: write \`use\`"
+
+try 'check "chg: new verb check"' \
+    "a word that is not a verb is rejected and the title must be rewritten"
+is errlvl 1
+is err part "[L1] TITLE-VERB: description must start with an imperative verb; \`new\` is not a verb: start the title with the action it performs"
+
+try 'check "chg: [report] juxtapose the two timelines"' \
+    "a genuine unlisted base verb is rejected with the instruction to list it"
+is errlvl 1
+is err part "[L1] TITLE-VERB: description must start with an imperative verb; \`juxtapose\` is a base-form verb missing from"
+is err part "commit-msg/verbs.txt"
+is err part "5. If TITLE-VERB says a base-form verb is missing from"
+is err part "ask the user via the MCP \`Question\` tool whether to add it"
+is err part "Do not swap it for a weaker listed verb, and do not bypass the hook."
+
+try 'check "$(cat <<'"'"'EOF'"'"'
+fix: ``pkg`` now lists verbs
+EOF
+)"' \
+    "a description starting with a technical term is rejected"
+is errlvl 1
+is err part "[L1] TITLE-VERB"
+
+try 'check "chg: [git-hook] normalise and colour the verb list"' \
+    "British spellings are accepted"
+noerror
+
+try 'check "fixup! added a verb check"' \
+    "autosquash titles are not audited"
 noerror
