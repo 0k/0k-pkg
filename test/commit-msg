@@ -84,6 +84,19 @@ try 'check "chg: [git-hook] normalise and colour the verb list"' \
     "British spellings are accepted"
 noerror
 
+
+## Title separated from the body
+
+try 'check "fix: [api] reject empty tokens" "The parser accepted them."' \
+    "a body line directly after the title is rejected"
+is errlvl 1
+is err part "[L2] TITLE-BODY-SEP"
+is err part "offending: «The parser accepted them.»"
+
+try 'check "fix: [api] reject empty tokens" "" "The parser accepted them."' \
+    "a blank line between title and body is accepted"
+noerror
+
 try 'check "fixup! added a verb check"' \
     "autosquash titles are not audited"
 noerror

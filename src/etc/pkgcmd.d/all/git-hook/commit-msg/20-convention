@@ -252,6 +252,15 @@ if ($title !~ /^(fix|chg|new):/) {
     }
 }
 
+## A body must be separated from the title by a blank line: git takes
+## everything up to the first blank line as the subject, so a body
+## line glued to the title silently becomes part of it.
+if (@lines > 1 && $lines[1] !~ /^\s*$/) {
+    add_violation(2, 'TITLE-BODY-SEP',
+        'the title must be followed by a blank line before the body; otherwise git joins the title and the first paragraph into one subject',
+        $lines[1]);
+}
+
 ## ── Pass 2: backtick / technical-token audit (whole message) ─────────
 ## Mask out all ``...`` double-backtick spans first so we don't flag
 ## tokens that are already correctly wrapped.
@@ -368,6 +377,7 @@ if (@violations) {
     print STDERR "      (filenames, paths, --long-options, \$VARS, function/type names)\n";
     print STDERR "    • Description must contain no `[` and no bare `.`\n";
     print STDERR "    • Title must be ≤ 72 chars and end with no trailing period\n";
+    print STDERR "    • Separate the title from the body with one blank line\n";
     print STDERR "\n";
     print STDERR "  For LLM agents — IMPORTANT:\n";
     print STDERR "    If you are reading this, you must NOT bypass this hook autonomously.\n";
