@@ -173,7 +173,7 @@ warning so that ~./autogen.sh~ still succeeds for someone who only
 wants to build.  ~pkg~ exports ~AUTOGEN_STRICT=1~ for the whole
 release pipeline, which turns those into hard errors.
 
-*** ~pkg announce~ - Preview and send opt-in release announcements
+*** ~pkg announce~ - Preview and send opt-in release and commit announcements
 
 Announcements are a separate, explicit workflow.  ~pkg --publish~ never
 checks, previews, or sends announcements.  A project opts in only by adding
@@ -198,7 +198,23 @@ pkg announce send --target community --message /tmp/release.txt \
 pkg announce check --target community --draft /tmp/fixed.txt --release 1.2.3 --replace
 pkg announce send --target community --message /tmp/fixed.txt \
   --release 1.2.3 --approved-sha256 DIGEST_FROM_CHECK --replace
+
+# Projects that publish without release tags announce a commit instead:
+# --commit replaces --release in check and send (with or without --replace)
+pkg announce check --target community --draft /tmp/fix.txt --commit 1a0a48a
+pkg announce send --target community --message /tmp/fix.txt \
+  --commit 1a0a48a --approved-sha256 DIGEST_FROM_CHECK
 #+end_src
+
+The subject of an announcement is either a release tag (~--release~) or a
+commit (~--commit~); the two are mutually exclusive.  A commit may be given
+abbreviated or by any revision name: it is resolved once to its full hash,
+and that hash is what the preview shows, the digest binds, and the receipt
+records.  A commit announcement's identity simply has no ~release~ field, so
+an approval for a release can never send as a commit announcement, nor the
+reverse.  Receipts are kept per subject: announcing the same commit again
+returns its existing receipt, and ~--replace~ edits that commit's
+announcement.
 
 All successful commands write JSON data to stdout.  Diagnostics and errors
 go to stderr.  ~check~ and ~context~ use Matrix GET requests only.  Supplying

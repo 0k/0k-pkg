@@ -1,4 +1,10 @@
-"""Command line contract for opt-in release announcements."""
+"""Command line contract for opt-in release and commit announcements.
+
+An announcement is about a *subject*: either a release tag
+(``--release``) or a single commit (``--commit``, for projects that
+publish without tagging releases).  A subject is a ``(kind, name)``
+pair; for a commit, ``name`` is the full resolved commit hash.
+"""
 
 import argparse
 import hashlib
@@ -37,6 +43,8 @@ IDENTITY_KEYS = {
     "version", "project", "target", "transport", "homeserver", "room_alias",
     "room_id", "sender", "release", "commit", "content", "body_sha256",
 }
+# A commit announcement has no release: its identity is the commit itself.
+COMMIT_IDENTITY_KEYS = IDENTITY_KEYS - {"release"}
 FORMATTED_CONTENT_KEYS = {"msgtype", "body", "format", "formatted_body"}
 REPLACEMENT_CONTENT_KEYS = FORMATTED_CONTENT_KEYS | {"m.new_content", "m.relates_to"}
 HTML_FORMAT = "org.matrix.custom.html"
@@ -241,13 +249,13 @@ def target_by_name(targets, name, required=False):
     return matches
 
 
-def git(root, *args):
+def git(root, *args, error="release tag does not exist or is ambiguous"):
     result = subprocess.run(
         ["git", "-C", str(root), *args], stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL, text=True, check=False,
     )
     if result.returncode != 0:
-        raise UsageError("release tag does not exist or is ambiguous")
+        raise UsageError(error)
     return result.stdout.strip()
 
 
@@ -263,6 +271,46 @@ def release_commit(root, release):
     return git(root, "rev-parse", "--verify", f"refs/tags/{release}^{{commit}}")
 
 
+def resolve_commit(root, revision):
+    """Full hash of the commit named by ``revision`` (hash or abbreviation)."""
+    if (
+        not isinstance(revision, str)
+        or not revision
+        or revision.startswith("-")
+        or any(ord(character) < 0x21 or ord(character) > 0x7e for character in revision)
+    ):
+        raise UsageError("invalid commit")
+    commit = git(
+        root, "rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}",
+        error="commit does not exist or is ambiguous",
+    )
+    if not COMMIT_RE.fullmatch(commit):
+        raise UsageError("commit does not exist or is ambiguous")
+    return commit
+
+
+def subject_from_args(root, args):
+    """The announced ``(kind, name)`` from ``--release`` or ``--commit``."""
+    if args.release is not None:
+        return ("release", args.release)
+    return ("commit", resolve_commit(root, args.commit))
+
+
+def subject_key(subject):
+    """State directory key of a subject.
+
+    A release keeps its bare tag name so existing receipts stay where they
+    are.  ``\\0`` cannot appear in a tag name, so commit keys never collide.
+    """
+    kind, name = subject
+    return name if kind == "release" else f"commit\0{name}"
+
+
+def describe(subject):
+    kind, name = subject
+    return f"{kind} '{name}'"
+
+
 def project_id(root):
     result = subprocess.run(
         ["git", "-C", str(root), "remote", "get-url", "origin"],
@@ -272,9 +320,12 @@ def project_id(root):
         remote = result.stdout.strip()
         if any(ord(character) < 0x21 or ord(character) > 0x7e for character in remote):
             raise UsageError("origin remote URL is unsafe")
-        if "://" not in remote and "@" in remote and ":" in remote:
+        # scp-like syntax, ``[user@]host:path``: git's rule is no ``://``
+        # and no ``/`` before the first ``:``.
+        if "://" not in remote and ":" in remote and "/" not in remote.split(":", 1)[0]:
             _user_host, path = remote.split(":", 1)
             host = _user_host.rsplit("@", 1)[-1]
+            path = path.lstrip("/")
             if not host or not path:
                 raise UsageError("origin remote URL is unsafe")
             remote = f"https://{host}/{path}"
@@ -402,8 +453,9 @@ def announced_body(content):
     return content.get("m.new_content", content)["body"]
 
 
-def identity(root, target, account, room_id, release, raw, body, replaces=None):
-    commit = release_commit(root, release)
+def identity(root, target, account, room_id, subject, raw, body, replaces=None):
+    kind, name = subject
+    commit = release_commit(root, name) if kind == "release" else name
     content = message_content(body)
     if replaces is not None:
         content = replacement_content(content, replaces)
@@ -416,11 +468,13 @@ def identity(root, target, account, room_id, release, raw, body, replaces=None):
         "room_alias": target["room"],
         "room_id": room_id,
         "sender": target["sender"],
-        "release": release,
+        "release": name,
         "commit": commit,
         "content": content,
         "body_sha256": hashlib.sha256(raw).hexdigest(),
     }
+    if kind == "commit":
+        del value["release"]
     if replaces is not None:
         value["replaces"] = replaces
     return value, approval_digest(value)
@@ -480,8 +534,8 @@ def component(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def operation_dir(identity_value):
-    return state_root() / component(identity_value["project"]) / component(identity_value["target"]) / component(identity_value["release"])
+def operation_dir(project, target_name, key):
+    return state_root() / component(project) / component(target_name) / component(key)
 
 
 def validate_receipt(receipt, root, target, account, room_id):
@@ -495,7 +549,11 @@ def validate_receipt(receipt, root, target, account, room_id):
     if receipt.get("receipt_version") != RECEIPT_VERSION or receipt.get("status") != "complete":
         raise ApprovalError("existing announcement receipt has an unsupported version or status")
     identity_value = receipt.get("identity")
-    if not isinstance(identity_value, dict) or set(identity_value) not in (IDENTITY_KEYS, IDENTITY_KEYS | {"replaces"}):
+    allowed = (
+        IDENTITY_KEYS, IDENTITY_KEYS | {"replaces"},
+        COMMIT_IDENTITY_KEYS, COMMIT_IDENTITY_KEYS | {"replaces"},
+    )
+    if not isinstance(identity_value, dict) or set(identity_value) not in allowed:
         raise ApprovalError("existing announcement receipt identity is malformed")
     replaces = identity_value.get("replaces")
     if "replaces" in identity_value and not valid_event_id(replaces):
@@ -520,16 +578,26 @@ def validate_receipt(receipt, root, target, account, room_id):
     }
     if any(identity_value.get(key) != value for key, value in expected_fields.items()):
         raise ApprovalError("existing announcement receipt does not match the current project or destination")
-    release = identity_value.get("release")
     commit = identity_value.get("commit")
-    if not isinstance(release, str) or not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit):
-        raise ApprovalError("existing announcement receipt release commit has drifted")
-    try:
-        current_commit = release_commit(root, release)
-    except UsageError:
-        raise ApprovalError("existing announcement receipt release commit has drifted") from None
-    if current_commit != commit:
-        raise ApprovalError("existing announcement receipt release commit has drifted")
+    if not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit):
+        raise ApprovalError("existing announcement receipt commit is malformed")
+    if "release" in identity_value:
+        release = identity_value.get("release")
+        if not isinstance(release, str):
+            raise ApprovalError("existing announcement receipt release commit has drifted")
+        try:
+            current_commit = release_commit(root, release)
+        except UsageError:
+            raise ApprovalError("existing announcement receipt release commit has drifted") from None
+        if current_commit != commit:
+            raise ApprovalError("existing announcement receipt release commit has drifted")
+    else:
+        try:
+            current_commit = resolve_commit(root, commit)
+        except UsageError:
+            raise ApprovalError("existing announcement receipt commit is no longer in the repository") from None
+        if current_commit != commit:
+            raise ApprovalError("existing announcement receipt commit is no longer in the repository")
     body_sha256 = identity_value.get("body_sha256")
     if not isinstance(body_sha256, str) or not HEX64_RE.fullmatch(body_sha256) or body_sha256 != hashlib.sha256(body_bytes).hexdigest():
         raise ApprovalError("existing announcement receipt body hash is invalid")
@@ -553,8 +621,7 @@ def validate_receipt(receipt, root, target, account, room_id):
 
 def command_check(args, root, targets, accounts):
     selected = target_by_name(targets, args.target)
-    if (args.draft is None) != (args.release is None):
-        raise UsageError("--draft and --release must be used together")
+    subject = subject_from_args(root, args) if args.draft is not None else None
     output = []
     for target in selected:
         account, _token, _client, room_id = readiness(target, accounts)
@@ -563,9 +630,11 @@ def command_check(args, root, targets, accounts):
             raw, body = read_message(args.draft)
             replaces = None
             if args.replace:
-                replaces = announced_receipt(root, target, account, room_id, args.release, _client)["event_id"]
-            value, digest = identity(root, target, account, room_id, args.release, raw, body, replaces)
-            preview = {"body": body, "content": value["content"], "sender": target["sender"], "room_alias": target["room"], "room_id": room_id, "release": args.release, "commit": value["commit"], "version": SCHEMA_VERSION}
+                replaces = announced_receipt(root, target, account, room_id, subject, _client)["event_id"]
+            value, digest = identity(root, target, account, room_id, subject, raw, body, replaces)
+            preview = {"body": body, "content": value["content"], "sender": target["sender"], "room_alias": target["room"], "room_id": room_id, "commit": value["commit"], "version": SCHEMA_VERSION}
+            if subject[0] == "release":
+                preview["release"] = subject[1]
             if replaces is not None:
                 preview["replaces"] = replaces
             item.update({"preview": preview, "approved_sha256": digest})
@@ -575,32 +644,33 @@ def command_check(args, root, targets, accounts):
     return {"enabled": True, "targets": output}
 
 
-def announced_receipt(root, target, account, room_id, release, client):
-    """The verified receipt of the original announcement of ``release``.
+def announced_receipt(root, target, account, room_id, subject, client):
+    """The verified receipt of the original announcement of ``subject``.
 
     ``--replace`` edits target this event: Matrix requires every edit to
     point at the original message, never at a previous edit.  Edits keep
     their own receipts, so this receipt is never overwritten.
     """
-    directory = operation_dir({"project": project_id(root), "target": target["name"], "release": release})
+    directory = operation_dir(project_id(root), target["name"], subject_key(subject))
     receipt = read_json(directory / "complete.json")
     if receipt is None:
-        raise UsageError(f"no completed announcement for release '{release}' to replace")
+        raise UsageError(f"no completed announcement for {describe(subject)} to replace")
     identity_value = validate_receipt(receipt, root, target, account, room_id)
     if "replaces" in identity_value:
-        raise ApprovalError("release announcement receipt is unexpectedly an edit")
+        raise ApprovalError(f"{subject[0]} announcement receipt is unexpectedly an edit")
+    if ("release" in identity_value) != (subject[0] == "release") or identity_value.get(subject[0]) != subject[1]:
+        raise ApprovalError("announcement receipt does not belong to the requested subject")
     timestamp = verify_event(client.event(room_id, receipt["event_id"]), receipt)
     if timestamp != receipt["origin_server_ts"]:
         raise ApprovalError("remote Matrix event timestamp does not match stored evidence")
     return receipt
 
 
-def replacement_operation_dir(root, target, release, replaces, digest):
-    return operation_dir({
-        "project": project_id(root),
-        "target": target["name"],
-        "release": f"{release}\0replace\0{replaces}\0{digest}",
-    })
+def replacement_operation_dir(root, target, subject, replaces, digest):
+    return operation_dir(
+        project_id(root), target["name"],
+        f"{subject_key(subject)}\0replace\0{replaces}\0{digest}",
+    )
 
 
 def command_send(args, root, targets, accounts):
@@ -608,25 +678,21 @@ def command_send(args, root, targets, accounts):
     account = account_for(accounts, target["sender"])
     token = credential(account)
     raw, body = read_message(args.message)
-    release_identity = {
-        "project": project_id(root),
-        "target": target["name"],
-        "release": args.release,
-    }
-    release_dir = operation_dir(release_identity)
+    subject = subject_from_args(root, args)
+    subject_dir = operation_dir(project_id(root), target["name"], subject_key(subject))
     replaces = None
     if args.replace:
         # The edit is its own durable, retry-safe operation keyed by the
-        # edited event and the approved digest; the release's receipt is
+        # edited event and the approved digest; the subject's receipt is
         # only read to find the event to edit.
         client = MatrixClient(account["homeserver"], token)
         room_id = client.readiness(target["sender"], target["room"])
-        with operation_lock(release_dir / "operation.lock"):
-            replaces = announced_receipt(root, target, account, room_id, args.release, client)["event_id"]
-        _, digest = identity(root, target, account, room_id, args.release, raw, body, replaces)
-        directory = replacement_operation_dir(root, target, args.release, replaces, digest)
+        with operation_lock(subject_dir / "operation.lock"):
+            replaces = announced_receipt(root, target, account, room_id, subject, client)["event_id"]
+        _, digest = identity(root, target, account, room_id, subject, raw, body, replaces)
+        directory = replacement_operation_dir(root, target, subject, replaces, digest)
     else:
-        directory = release_dir
+        directory = subject_dir
     with operation_lock(directory / "operation.lock"):
         complete_path = directory / "complete.json"
         pending_path = directory / "pending.json"
@@ -637,7 +703,7 @@ def command_send(args, root, targets, accounts):
             raise ApprovalError("Matrix credential changed while an announcement outcome is pending")
         client = MatrixClient(account["homeserver"], token)
         room_id = client.readiness(target["sender"], target["room"])
-        value, digest = identity(root, target, account, room_id, args.release, raw, body, replaces)
+        value, digest = identity(root, target, account, room_id, subject, raw, body, replaces)
         if digest != args.approved_sha256:
             raise ApprovalError("approved digest does not match current announcement identity or content")
         if complete is not None:
@@ -752,18 +818,22 @@ def parser():
     check = sub.add_parser("check")
     check.add_argument("--target")
     check.add_argument("--draft")
-    check.add_argument("--release")
+    check_subject = check.add_mutually_exclusive_group()
+    check_subject.add_argument("--release", help="announce this release tag")
+    check_subject.add_argument("--commit", help="announce this commit (for projects without release tags)")
     context = sub.add_parser("context")
     context.add_argument("--target", required=True)
     send = sub.add_parser("send")
     send.add_argument("--target", required=True)
     send.add_argument("--message", required=True)
-    send.add_argument("--release", required=True)
+    send_subject = send.add_mutually_exclusive_group(required=True)
+    send_subject.add_argument("--release", help="announce this release tag")
+    send_subject.add_argument("--commit", help="announce this commit (for projects without release tags)")
     send.add_argument("--approved-sha256", required=True)
     for command in (check, send):
         command.add_argument(
             "--replace", action="store_true",
-            help="edit the release's existing announcement instead of posting a new one",
+            help="edit the existing announcement of the release or commit instead of posting a new one",
         )
     return result
 
@@ -780,10 +850,11 @@ def main():
             return 0
         if args.command == "check":
             target_by_name(targets, args.target)
-            if (args.draft is None) != (args.release is None):
-                raise UsageError("--draft and --release must be used together")
+            has_subject = args.release is not None or args.commit is not None
+            if (args.draft is not None) != has_subject:
+                raise UsageError("--draft requires --release or --commit, and they require --draft")
             if args.replace and (args.draft is None or args.target is None):
-                raise UsageError("--replace requires --target, --draft and --release")
+                raise UsageError("--replace requires --target, --draft and --release or --commit")
         else:
             target_by_name(targets, args.target, required=True)
         accounts = load_accounts_yaml(args.accounts_yaml, args.yq_bin)

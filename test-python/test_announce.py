@@ -385,6 +385,11 @@ class AnnounceTest(unittest.TestCase):
         self.assertEqual("https://example.invalid/org/project", receipt["identity"]["project"])
         self.assertNotIn("git@", json.dumps(receipt))
 
+    def test_scp_origin_without_user_normalizes(self):
+        subprocess.run(["git", "remote", "add", "origin", "example.invalid:/var/git/project"], cwd=self.root, check=True)
+        _, receipt = self.send(self.preview()["approved_sha256"])
+        self.assertEqual("https://example.invalid/var/git/project", receipt["identity"]["project"])
+
     def test_preview_send_and_verified_receipt(self):
         preview = self.preview()
         _, receipt = self.send(preview["approved_sha256"])
@@ -699,6 +704,87 @@ class AnnounceTest(unittest.TestCase):
         proc, _ = self.replace_send(self.preview()["approved_sha256"], expect=4)
         self.assertIn("approved digest does not match", proc.stderr)
         self.assertEqual(1, len(self.matrix.puts))
+
+    def commit(self, name):
+        (self.root / name).write_text(f"{name}\n")
+        subprocess.run(["git", "add", name], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", f"new: add {name}"], cwd=self.root, check=True)
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,
+                              text=True, stdout=subprocess.PIPE).stdout.strip()
+
+    def commit_preview(self, commit, *extra, expect=0):
+        return self.invoke("check", "--target", "demo", "--draft", self.message,
+                           "--commit", commit, *extra, expect=expect)
+
+    def commit_send(self, commit, digest, *extra, expect=0):
+        return self.invoke("send", "--target", "demo", "--message", self.message,
+                           "--commit", commit, "--approved-sha256", digest, *extra, expect=expect)
+
+    def test_commit_announcement_is_sent_for_an_untagged_commit(self):
+        full = self.commit("untagged")
+        _, preview = self.commit_preview(full[:7])
+        self.assertEqual(full, preview["preview"]["commit"])
+        self.assertNotIn("release", preview["preview"])
+        _, receipt = self.commit_send(full[:7], preview["approved_sha256"])
+        self.assertEqual(("complete", full), (receipt["status"], receipt["identity"]["commit"]))
+        self.assertNotIn("release", receipt["identity"])
+        self.assertEqual("Release exact body\n", self.matrix.puts[0][2]["body"])
+
+    def test_commit_announcement_send_is_idempotent(self):
+        full = self.commit("untagged")
+        digest = self.commit_preview(full)[1]["approved_sha256"]
+        _, first = self.commit_send(full, digest)
+        _, replay = self.commit_send(full, digest)
+        self.assertEqual(first, replay)
+        self.assertEqual(1, len(self.matrix.puts))
+
+    def test_commit_approval_is_bound_to_its_commit(self):
+        first = self.commit("first")
+        digest = self.commit_preview(first)[1]["approved_sha256"]
+        second = self.commit("second")
+        proc, _ = self.commit_send(second, digest, expect=4)
+        self.assertIn("approved digest does not match", proc.stderr)
+        self.assertEqual([], self.matrix.puts)
+
+    def test_release_approval_cannot_send_as_its_commit(self):
+        digest = self.preview()["approved_sha256"]
+        tagged = subprocess.run(["git", "rev-parse", "1.0.0^{commit}"], cwd=self.root, check=True,
+                                text=True, stdout=subprocess.PIPE).stdout.strip()
+        self.commit_send(tagged, digest, expect=4)
+        self.assertEqual([], self.matrix.puts)
+
+    def test_commit_and_release_are_mutually_exclusive(self):
+        proc, _ = self.invoke("check", "--target", "demo", "--draft", self.message,
+                              "--release", "1.0.0", "--commit", "HEAD", expect=2)
+        self.assertIn("not allowed with argument", proc.stderr)
+        self.assertEqual([], self.matrix.requests)
+
+    def test_unknown_or_option_like_commit_is_refused_before_matrix(self):
+        for bad in ("0" * 40, "--all"):
+            proc, _ = self.invoke("check", "--target", "demo", "--draft", self.message,
+                                  f"--commit={bad}", expect=2)
+            self.assertRegex(proc.stderr, "invalid commit|commit does not exist")
+        self.assertEqual([], self.matrix.puts)
+
+    def test_commit_announcement_can_be_replaced_in_place(self):
+        full = self.commit("untagged")
+        _, original = self.commit_send(full, self.commit_preview(full)[1]["approved_sha256"])
+        self.message.write_text("Fixed\n")
+        _, preview = self.commit_preview(full, "--replace")
+        self.assertEqual(original["event_id"], preview["preview"]["replaces"])
+        self.commit_send(full, preview["approved_sha256"], "--replace")
+        self.assertEqual(original["event_id"], self.matrix.puts[-1][2]["m.relates_to"]["event_id"])
+
+    def test_commit_replace_without_announcement_refuses(self):
+        full = self.commit("untagged")
+        proc, _ = self.commit_preview(full, "--replace", expect=2)
+        self.assertEqual(f"Error: no completed announcement for commit '{full}' to replace\n", proc.stderr)
+
+    def test_context_returns_latest_commit_announcement_receipt(self):
+        full = self.commit("untagged")
+        _, receipt = self.commit_send(full, self.commit_preview(full)[1]["approved_sha256"])
+        _, context = self.invoke("context", "--target", "demo")
+        self.assertEqual(("receipt", receipt), (context["source"], context["announcement"]))
 
     def test_replace_without_announcement_refuses(self):
         proc, _ = self.replace_preview(expect=2)
