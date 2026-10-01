@@ -23,7 +23,12 @@ if command -v org-cli >/dev/null 2>&1; then
         clock_failed=0
         while IFS= read -r f; do
             [ -z "$f" ] && continue
-            staged_blob="$clock_tmp/$(echo "$f" | tr '/' '_')"
+            ## Keep the file's repository-relative path under the
+            ## tempdir: ``clock.overlap.exclude-globs`` rules such as
+            ## ``**/tests/**/*.org`` match on directory names, which a
+            ## flattened name would erase.
+            staged_blob="$clock_tmp/$f"
+            mkdir -p "$(dirname "$staged_blob")"
             ## ``git show :PATH`` reads the index version of the file.
             if ! git show ":$f" >"$staged_blob" 2>/dev/null; then
                 ## Path may not be in the index (race / odd state); skip.
