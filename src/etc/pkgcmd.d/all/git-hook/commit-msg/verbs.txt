@@ -69,6 +69,7 @@ catch
 categorize
 centralise
 centralize
+centre
 change
 charge
 check
