@@ -1,0 +1,61 @@
+# -*- mode: shell-script -*-
+# shellcheck shell=bash
+# sunit provides the DSL variables and intentionally evaluates quoted commands.
+# shellcheck disable=SC2016,SC2034,SC2154
+
+## ``pkg-git-hook``: global hooks are skipped for test-suite throwaway
+## repositories (``NODE_ENV=test`` AND repository under ``$TMPDIR``),
+## and run everywhere else.  The repository copy of pkgcmd and its
+## plugins is used, invoked under the ``pkg-git-hook`` name as the
+## ``core.hooksPath`` trampolines do.  ``commit-msg`` with a message
+## breaking the commit convention is the probe: ``20-convention``
+## rejects it whenever the global hooks run.
+
+prefix_cmd='
+export PKGCMD_CONFIG_PATH="$base/src/etc/pkgcmd.d"
+mkdir -p "$test_tmpdir/bin" "$test_tmpdir/sandbox"
+ln -sf "$base/src/bin/pkgcmd" "$test_tmpdir/bin/pkg-git-hook"
+export PATH="$test_tmpdir/bin:$PATH"
+export TMPDIR="$test_tmpdir/sandbox"
+unset NODE_ENV
+mkrepo() { rm -rf "$1"; mkdir -p "$1"; git -C "$1" init -q --template=; printf "bad message\n" > "$1/msg"; }
+hook() { (cd "$1" && shift && pkg-git-hook "$@"); }
+'
+
+
+try 'mkrepo "$TMPDIR/repo"; NODE_ENV=test hook "$TMPDIR/repo" commit-msg msg' \
+    "test suite in a temporary repository skips the global hooks"
+noerror
+
+try 'mkrepo "$TMPDIR/a/b/repo"; NODE_ENV=test hook "$TMPDIR/a/b/repo" commit-msg msg' \
+    "a repository nested anywhere under TMPDIR is temporary"
+noerror
+
+try 'mkrepo "$test_tmpdir/real"; NODE_ENV=test hook "$test_tmpdir/real" commit-msg msg' \
+    "NODE_ENV=test in a repository outside TMPDIR still runs the hooks"
+is errlvl 1
+is err part "commit-msg: REJECTED"
+
+try 'mkrepo "$TMPDIR/repo"; hook "$TMPDIR/repo" commit-msg msg' \
+    "a temporary repository without NODE_ENV=test still runs the hooks"
+is errlvl 1
+is err part "commit-msg: REJECTED"
+
+try 'mkrepo "$TMPDIR/repo"; NODE_ENV=production hook "$TMPDIR/repo" commit-msg msg' \
+    "only NODE_ENV=test counts as a test suite"
+is errlvl 1
+is err part "commit-msg: REJECTED"
+
+try 'mkrepo "$test_tmpdir/sandbox-sibling"; NODE_ENV=test hook "$test_tmpdir/sandbox-sibling" commit-msg msg' \
+    "a directory merely prefixed by TMPDIR is not under it"
+is errlvl 1
+is err part "commit-msg: REJECTED"
+
+try 'mkrepo "$TMPDIR/repo"
+mkdir -p "$TMPDIR/repo/.git/hooks"
+printf "#!/bin/sh\necho local-hook-ran >&2; exit 3\n" > "$TMPDIR/repo/.git/hooks/commit-msg"
+chmod +x "$TMPDIR/repo/.git/hooks/commit-msg"
+NODE_ENV=test hook "$TMPDIR/repo" commit-msg msg' \
+    "the repository-local hook still runs in a skipped temporary repository"
+is errlvl 3
+is err part "local-hook-ran"

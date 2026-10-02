@@ -66,15 +66,37 @@ pkgcmd:lint:all:run() {
 ##
 ## Silent on success: git hooks are expected not to print unless they
 ## have something to report.
+##
+## Test-suite repositories are exempt from the global checks: when
+## ``NODE_ENV`` is ``test`` (set by ``bun test``, jest, vitest) AND the
+## repository lives under ``$TMPDIR`` (default ``/tmp``), the
+## ``git-hook/<HOOK>/`` scripts are skipped.  Such repositories are
+## throwaway fixtures a test suite commits into (``git commit -m init``,
+## ``README.md``); the user's conventions do not apply to them, and test
+## runners may hand git children the developer's own environment
+## (``OPENCODE=1``, real ``XDG_CONFIG_HOME``).  Both conditions are
+## required, so a real repository, or a manual commit in ``/tmp``, is
+## still checked.  The repository-local hook still runs.
+pkg._git_hook_test_sandbox() {
+    local toplevel tmp
+    [ "${NODE_ENV:-}" = test ] || return 1
+    toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || return 1
+    toplevel="$(readlink -f "$toplevel")" || return 1
+    tmp="$(readlink -f "${TMPDIR:-/tmp}")" || return 1
+    [[ "$toplevel" == "$tmp"/* ]]
+}
+
 pkgcmd:pkg-git-hook:all:run() {
     local hook="$1" script local_hook
     shift
     if [ -z "$hook" ]; then
         die "pkg-git-hook: missing hook name argument."
     fi
-    while read-0 script; do
-        "$script" "$@" || return "$?"
-    done < <(pkg._list_scripts "git-hook/$hook" | sort -z)
+    if ! pkg._git_hook_test_sandbox; then
+        while read-0 script; do
+            "$script" "$@" || return "$?"
+        done < <(pkg._list_scripts "git-hook/$hook" | sort -z)
+    fi
     local_hook="$(git rev-parse --git-dir 2>/dev/null)/hooks/$hook"
     if [ -x "$local_hook" ]; then
         exec "$local_hook" "$@"
