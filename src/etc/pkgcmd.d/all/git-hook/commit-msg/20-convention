@@ -338,10 +338,11 @@ for my $i (0 .. $#lines) {
     ## (f) Bare CamelCase identifiers (DateTime, BufReader)
     ##     Heuristic: ≥ 2 uppercase humps, no spaces.  Skip common words.
     my %camel_skip = map { $_ => 1 } qw(
-        OK TODO FIXME XXX HACK NOTE OpenAI OpenCode ChatGPT WebView WebKit
+        OK TODO FIXME XXX HACK NOTE OpenAI OpenCode ChatGPT WebView WebKit WebKitGTK
         PostgreSQL KiB MiB GiB TiB KHz MHz GHz JavaScript TypeScript
         PowerShell JSONPath YAML JSON GitHub GitLab DataFlow OAuth JavaDoc
         HiDPI FullCalendar SemVer WebSocket PyPI OpenCV GrabCut UniMorph
+        PulseAudio PipeWire FireCuda OpenSSL MariaDB InnoDB
     );
     while ($masked =~ /(?<![`\w])([A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+)(?![`\w])/g) {
         my $tok = $1;
