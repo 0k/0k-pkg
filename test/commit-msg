@@ -10,6 +10,10 @@
 prefix_cmd='
 hook="$base/src/etc/pkgcmd.d/all/git-hook/commit-msg/20-convention"
 check() { printf "%s\n" "$@" > "$test_tmpdir/msg"; "$hook" "$test_tmpdir/msg"; }
+## Prose of exactly N characters, words separated by single spaces.
+prose() { local s; s=$(printf "lorem %.0s" $(seq "$1")); printf "%sx" "${s:0:$1-1}"; }
+## A URL of exactly N characters, without spaces.
+url() { printf "https://example.org/%s" "$(printf "%0$(($1 - 20))d" 0)"; }
 '
 
 
@@ -100,3 +104,56 @@ noerror
 try 'check "fixup! added a verb check"' \
     "autosquash titles are not audited"
 noerror
+
+
+## Body wrapped at 80 columns
+
+try 'check "fix: [api] reject empty tokens" "" "$(prose 80)" "$(prose 79)é"' \
+    "body lines of 80 characters are accepted, multi-byte characters counting as one"
+noerror
+
+try 'check "fix: [api] reject empty tokens" "" "$(prose 81)"' \
+    "a body prose line of 81 characters is rejected"
+is errlvl 1
+is err part "[L3] BODY-WIDTH: line is 81 chars, wrap the body at 80"
+is err part "COMMIT_MSG_ALLOW_LONG_LINES=1"
+
+try 'check "fix: [api] reject empty tokens" "" "See \`\`$(url 90)\`\`"' \
+    "a line overflowing only through a token longer than 80 is accepted with a warning"
+is errlvl 0
+is err part "commit-msg: WARNING"
+is err part "[L3] BODY-WIDTH: line is 98 chars"
+
+try 'check "fix: [api] reject empty tokens" "" "$(prose 10) \`\`$(url 70)\`\`"' \
+    "a line whose last token would fit on its own line is rejected"
+is errlvl 1
+is err part "[L3] BODY-WIDTH: line is 85 chars"
+
+try 'check "fix: [api] reject empty tokens" "" "\`\`$(url 90)\`\` $(prose 10)"' \
+    "prose after an over-long token is rejected"
+is errlvl 1
+is err part "[L3] BODY-WIDTH"
+
+try 'check "fix: [api] reject empty tokens" "" "    $(prose 90)" "" "Refs: $(prose 90)"' \
+    "indented code lines and trailers are not width-checked"
+noerror
+
+try 'check "fix: [api] reject $(prose 72)"' \
+    "a title up to 96 characters is not body-width-checked"
+noerror
+
+try 'COMMIT_MSG_ALLOW_LONG_LINES=1 check "fix: [api] reject empty tokens" "" "$(prose 81)"' \
+    "the override turns a body-width rejection into a warning"
+is errlvl 0
+is err part "commit-msg: WARNING"
+is err part "[L3] BODY-WIDTH: line is 81 chars"
+
+try 'COMMIT_MSG_ALLOW_LONG_LINES=1 check "fix: [api] rejected empty tokens" "" "$(prose 81)"' \
+    "the override does not relax the other rules"
+is errlvl 1
+is err part "[L1] TITLE-VERB"
+
+try 'COMMIT_MSG_ALLOW_LONG_LINES=yes check "fix: [api] reject empty tokens" "" "$(prose 81)"' \
+    "an override value other than 1 is rejected"
+is errlvl 1
+is err part "COMMIT_MSG_ALLOW_LONG_LINES must be 1"

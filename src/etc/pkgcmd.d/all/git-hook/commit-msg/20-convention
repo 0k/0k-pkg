@@ -12,12 +12,14 @@ fi
 ## in the rejection message below (``{type}: {scope}? [module]?
 ## {description} !minor?``, double-backticked technical terms).
 ##
-## Two passes:
+## Three passes:
 ##   1. Structural grammar on the title line
 ##         {type}: ({scope}: )?(\[module\] )?{description}( !minor)?
 ##   2. Backtick / technical-token audit across the WHOLE message
 ##         (single-backtick → double, --options, $VARs, paths,
 ##          dotted filenames, CamelCase, snake_case)
+##   3. Body wrapped at 80 columns (warn-only for unbreakable tokens,
+##      COMMIT_MSG_ALLOW_LONG_LINES=1 to keep a long line on purpose)
 ##
 ## Tokens inside ``...`` double-backticks are MASKED before the
 ## technical-token passes to avoid false positives.
@@ -107,12 +109,18 @@ sub base_verb_of {
     return $inflected_of;
 }
 
-sub add_violation {
+sub format_finding {
     my ($lineno, $tag, $detail, $offender) = @_;
     my $loc = defined $lineno ? "L$lineno" : "msg";
     my $off = defined $offender ? "  offending: «$offender»" : "";
-    push @violations, "  [$loc] $tag: $detail$off";
+    return "  [$loc] $tag: $detail$off";
 }
+
+sub add_violation { push @violations, format_finding(@_); }
+
+## Findings reported without rejecting the commit.
+my @warnings;
+sub add_warning { push @warnings, format_finding(@_); }
 
 ## ── Pass 1: structural grammar on title ──────────────────────────────
 my $title = $lines[0];
@@ -363,7 +371,59 @@ for my $i (0 .. $#lines) {
     }
 }
 
+## ── Pass 3: body width ──────────────────────────────────────────────
+## Body lines are wrapped at $BODY_WIDTH columns, counted in
+## characters, not bytes.  Trailers and indented lines (code, quoted
+## output: 4 spaces or a tab) are not checked.  A line that rewrapping
+## cannot bring under the width -- its last token, a URL or a ``...``
+## span, is longer than the width on its own -- only warns.
+## ``COMMIT_MSG_ALLOW_LONG_LINES=1`` turns every BODY-WIDTH rejection
+## into a warning; LLM agents need the user's approval to set it.
+my $BODY_WIDTH = 80;
+my $allow_long = $ENV{COMMIT_MSG_ALLOW_LONG_LINES} // '';
+my $width_rejected = 0;
+if ($allow_long ne '' && $allow_long ne '1') {
+    add_violation(undef, 'BODY-WIDTH',
+        "COMMIT_MSG_ALLOW_LONG_LINES must be 1 or unset, got «$allow_long»");
+}
+for my $i (1 .. $#lines) {
+    my $lineno = $i + 1;
+    my $line   = $lines[$i];
+    next if $line =~ /^[A-Z][A-Za-z-]+:\s/;
+    next if $line =~ /^(?: {4}|\t)/;
+
+    my $chars = $line;
+    utf8::decode($chars);
+    my $width = length $chars;
+    next if $width <= $BODY_WIDTH;
+
+    ## A ``...`` span is one token, even when it holds spaces.
+    (my $atoms = $chars) =~ s/(``[^`]+``)/(my $s = $1) =~ tr{ \t}{\0\0}; $s/ge;
+    my ($last) = $atoms =~ /(\S+)\s*$/;
+
+    my $detail = sprintf('line is %d chars, wrap the body at %d',
+                         $width, $BODY_WIDTH);
+    if (length $last > $BODY_WIDTH) {
+        add_warning($lineno, 'BODY-WIDTH',
+            "$detail (kept: its last token is longer than $BODY_WIDTH on its own)",
+            $line);
+    } elsif ($allow_long eq '1') {
+        add_warning($lineno, 'BODY-WIDTH',
+            "$detail (kept: COMMIT_MSG_ALLOW_LONG_LINES=1)",
+            $line);
+    } else {
+        add_violation($lineno, 'BODY-WIDTH', $detail, $line);
+        $width_rejected = 1;
+    }
+}
+
 ## ── Report ──────────────────────────────────────────────────────────
+if (@warnings) {
+    print STDERR "commit-msg: WARNING — body lines kept over $BODY_WIDTH columns\n";
+    print STDERR "$_\n" for @warnings;
+    print STDERR "\n";
+}
+
 if (@violations) {
     print STDERR "commit-msg: REJECTED — commit-convention violations\n";
     print STDERR "\n";
@@ -377,8 +437,9 @@ if (@violations) {
     print STDERR "    • Wrap every technical term in DOUBLE-backticks: ``foo`` not `foo`\n";
     print STDERR "      (filenames, paths, --long-options, \$VARS, function/type names)\n";
     print STDERR "    • Description must contain no `[` and no bare `.`\n";
-    print STDERR "    • Title must be ≤ 72 chars and end with no trailing period\n";
+    print STDERR "    • Title must be ≤ 96 chars and end with no trailing period\n";
     print STDERR "    • Separate the title from the body with one blank line\n";
+    print STDERR "    • Wrap the body at $BODY_WIDTH columns (trailers and indented lines exempt)\n";
     print STDERR "\n";
     print STDERR "  For LLM agents — IMPORTANT:\n";
     print STDERR "    If you are reading this, you must NOT bypass this hook autonomously.\n";
@@ -399,8 +460,10 @@ if (@violations) {
     print STDERR "       with its own convention), you must ASK THE USER VIA THE MCP\n";
     print STDERR "       `Question` TOOL for explicit approval to use `git commit --no-verify`.\n";
     print STDERR "       Never bypass without that explicit approval.\n";
+    ## Conditional items, numbered after the fixed ones.
+    my $item = 5;
     if (defined $unlisted_verb) {
-        print STDERR "    5. If TITLE-VERB says a base-form verb is missing from verbs.txt and\n";
+        print STDERR "    " . $item++ . ". If TITLE-VERB says a base-form verb is missing from verbs.txt and\n";
         print STDERR "       `$unlisted_verb` is the right imperative for this change,\n";
         print STDERR "       ask the user via the MCP `Question` tool whether to add it to\n";
         print STDERR "       $data_dir/verbs.txt\n";
@@ -408,6 +471,14 @@ if (@violations) {
         print STDERR "       approval, then retry the same message.  If the user refuses, add\n";
         print STDERR "       it to not-verbs.txt next to it and rewrite the title.\n";
         print STDERR "       Do not swap it for a weaker listed verb, and do not bypass the hook.\n";
+    }
+    if ($width_rejected) {
+        print STDERR "    " . $item++ . ". On BODY-WIDTH, rewrap the paragraph at $BODY_WIDTH columns.  Only if a\n";
+        print STDERR "       line genuinely cannot be wrapped (a table, a long command), ask\n";
+        print STDERR "       the user via the MCP `Question` tool whether to keep it, quoting\n";
+        print STDERR "       the line.  Only after approval, retry with\n";
+        print STDERR "         COMMIT_MSG_ALLOW_LONG_LINES=1 git commit ...\n";
+        print STDERR "       which relaxes BODY-WIDTH only.  Never set it on your own.\n";
     }
     exit 1;
 }

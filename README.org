@@ -337,6 +337,16 @@ yet is rejected with an instruction to ask the user before adding it
 to ~verbs.txt~; words reviewed and refused live in ~not-verbs.txt~
 and are reported as "not a verb".
 
+~20-convention~ also requires the body to be wrapped at 80 columns,
+counted in characters.  Trailers (~Refs: …~) and lines indented by 4
+spaces or a tab (code, quoted output) are not checked.  A line whose
+last token is longer than 80 on its own, like a long URL in
+double-backticks, cannot be rewrapped: it is kept with a warning.
+To keep another long line on purpose, commit with
+~COMMIT_MSG_ALLOW_LONG_LINES=1~: body-width rejections become
+warnings, every other rule still applies.  LLM agents must get the
+user's approval before setting it.
+
 The ~*-opencode-*~ hooks only act when the ~$OPENCODE~ environment
 variable is ~1~ (set by the OpenCode agent harness) and are inert
 otherwise.  ~30-org-clock~ needs ~org-cli~ and ~90-assisted-by~
