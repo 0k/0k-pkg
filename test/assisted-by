@@ -1,0 +1,78 @@
+# -*- mode: shell-script -*-
+# shellcheck shell=bash
+# sunit provides the DSL variables and intentionally evaluates quoted commands.
+# shellcheck disable=SC2016,SC2034,SC2154
+
+## ``git-hook/commit-msg/90-assisted-by``: ``Assisted-by:`` trailers
+## come from ``ai-audit session assisted-by``, unless
+## ``$COMMIT_ASSISTED_BY`` names the models that authored the content.
+## A stub ``ai-audit`` stands for the detected session and records
+## each call in ``ai-audit.calls``.
+
+prefix_cmd='
+hook="$base/src/etc/pkgcmd.d/all/git-hook/commit-msg/90-assisted-by"
+mkdir -p "$test_tmpdir/bin"
+cat > "$test_tmpdir/bin/ai-audit" <<"STUB"
+#!/bin/bash
+echo "$*" >> "$test_tmpdir/ai-audit.calls"
+echo "Assisted-by: Detected:committer-model"
+STUB
+chmod +x "$test_tmpdir/bin/ai-audit"
+export PATH="$test_tmpdir/bin:$PATH" test_tmpdir
+unset COMMIT_ASSISTED_BY
+cd "$test_tmpdir"
+rm -f ai-audit.calls
+printf "fix: [api] reject empty tokens\n" > msg
+run() { "$hook" msg && cat msg; }
+'
+
+
+try 'run' \
+    "without the variable, the detected session gives the trailer"
+noerror
+is out "fix: [api] reject empty tokens
+
+Assisted-by: Detected:committer-model
+"
+
+try 'run >/dev/null; cat ai-audit.calls' \
+    "detection uses the ai-audit session form"
+is out "session assisted-by --quiet-if-no-session
+"
+
+try 'COMMIT_ASSISTED_BY="Claude:claude-sonnet-4-5" run' \
+    "the variable replaces the detected model"
+noerror
+is out "fix: [api] reject empty tokens
+
+Assisted-by: Claude:claude-sonnet-4-5
+"
+
+try 'COMMIT_ASSISTED_BY="Claude:claude-sonnet-4-5" run >/dev/null; test -e ai-audit.calls' \
+    "the variable skips session detection"
+is errlvl 1
+
+try 'COMMIT_ASSISTED_BY="Claude:claude-sonnet-4-5, Codex:gpt-5" run' \
+    "several comma-separated authors give one trailer each, in order"
+noerror
+is out "fix: [api] reject empty tokens
+
+Assisted-by: Claude:claude-sonnet-4-5
+Assisted-by: Codex:gpt-5
+"
+
+try 'COMMIT_ASSISTED_BY="claude sonnet" run' \
+    "a value that is not Agent:model is rejected"
+is errlvl 1
+is err part "COMMIT_ASSISTED_BY"
+is err part "«claude sonnet»"
+
+try 'COMMIT_ASSISTED_BY="Claude:claude-sonnet-4-5,claude sonnet" run 2>/dev/null; cat msg' \
+    "a rejected value leaves the message unchanged, even its valid entries"
+is out "fix: [api] reject empty tokens
+"
+
+try 'COMMIT_ASSISTED_BY="" run' \
+    "an empty value is rejected"
+is errlvl 1
+is err part "COMMIT_ASSISTED_BY"

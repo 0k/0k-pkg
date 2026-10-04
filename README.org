@@ -347,6 +347,14 @@ To keep another long line on purpose, commit with
 warnings, every other rule still applies.  LLM agents must get the
 user's approval before setting it.
 
+~90-assisted-by~ writes the ~Assisted-by:~ trailers given by
+~ai-audit session assisted-by~ for the committing AI session.  When
+other models authored the content, ~COMMIT_ASSISTED_BY~ names them
+instead (comma-separated ~Agent:model~, e.g.
+~COMMIT_ASSISTED_BY='Claude:claude-sonnet-4-5' git commit …~): it
+replaces session detection, and a malformed value rejects the commit.
+LLM agents must confirm with the user before setting it.
+
 The ~*-opencode-*~ hooks only act when the ~$OPENCODE~ environment
 variable is ~1~ (set by the OpenCode agent harness) and are inert
 otherwise.  ~30-org-clock~ needs ~org-cli~ and ~90-assisted-by~
