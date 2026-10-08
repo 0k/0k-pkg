@@ -1,0 +1,176 @@
+# -*- mode: shell-script -*-
+# shellcheck shell=bash
+# sunit provides the DSL variables and intentionally evaluates quoted commands.
+# shellcheck disable=SC2016,SC2034,SC2154
+
+## ``50-cargo-path-deps``: a commit may not ADD a Cargo dependency whose
+## ``path`` leaves the repository, nor turn a registry crate of
+## ``Cargo.lock`` into a local path package.  Path dependencies already
+## committed, paths inside the repository and unstaged edits pass.
+
+prefix_cmd='
+hook=$base/src/etc/pkgcmd.d/all/git-hook/pre-commit/50-cargo-path-deps
+g() { git -c user.name=t -c user.email=t@example.org -c commit.gpgsign=false \
+          -c core.hooksPath=/dev/null "$@"; }
+## ``mkrepo DIR CARGO_TOML``: repository whose HEAD holds that manifest.
+mkrepo() {
+    rm -rf "$1"; mkdir -p "$1"; git -C "$1" init -q --template=
+    printf "%s" "$2" > "$1/Cargo.toml"
+    g -C "$1" add Cargo.toml; g -C "$1" commit -q -m init
+}
+## ``stage DIR FILE CONTENT``: write and stage FILE.
+stage() { mkdir -p "$(dirname "$1/$2")"; printf "%s" "$3" > "$1/$2"; git -C "$1" add "$2"; }
+run_hook() { (cd "$1" && "$hook"); }
+manifest() { printf "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n%s\n" "$1"; }
+lock() { printf "version = 4\n\n%s" "$1"; }
+reg_pkg="[[package]]
+name = \"kal-log\"
+version = \"0.1.0\"
+source = \"registry+https://github.com/rust-lang/crates.io-index\"
+checksum = \"28051282959cac308c26d3d5d34b8d30c81ae91e23ab3045044c34c5e122a000\"
+"
+path_pkg="[[package]]
+name = \"kal-log\"
+version = \"0.1.0\"
+"
+R=$test_tmpdir/repo
+'
+
+
+try 'mkrepo "$R" "$(manifest "[dependencies]
+kal-log = \"0.1\"")"
+stage "$R" Cargo.toml "$(manifest "[dependencies]
+kal-log = { path = \"../kal-log\" }")"
+run_hook "$R"' \
+    "staging a new path dependency outside the repository is refused"
+is errlvl 1
+is err part 'BLOCKED: staged changes add Cargo path dependencies outside the repository:
+  Cargo.toml: [dependencies] kal-log = { path = "../kal-log" }
+'
+
+try 'mkrepo "$R" "$(manifest "[dependencies]
+kal-log = \"0.1\"")"
+manifest "[dependencies]
+kal-log = { path = \"../kal-log\" }" > "$R/Cargo.toml"
+run_hook "$R"' \
+    "an unstaged path dependency in the working tree is not checked"
+noerror
+
+try 'mkrepo "$R" "$(manifest "[dependencies]
+kal-sse = { path = \"../kal-sse\" }")"
+stage "$R" Cargo.toml "$(manifest "[dependencies]
+kal-sse = { path = \"../kal-sse\" }
+log = \"0.4\"")"
+run_hook "$R"' \
+    "a path dependency already committed does not block other changes"
+noerror
+
+try 'mkrepo "$R" "$(manifest "[dependencies]
+kal-sse = { path = \"../kal-sse\" }")"
+stage "$R" Cargo.toml "$(manifest "[dependencies]
+kal-sse = { path = \"../../elsewhere/kal-sse\" }")"
+run_hook "$R"' \
+    "changing the path of a committed path dependency is refused"
+is errlvl 1
+is err part '  Cargo.toml: [dependencies] kal-sse = { path = "../../elsewhere/kal-sse" }'
+
+try 'mkrepo "$R" "$(manifest "")"
+stage "$R" Cargo.toml "$(manifest "[dependencies]
+member = { path = \"crates/member\" }
+[workspace.dependencies]
+other = { path = \"./crates/../crates/other\" }")"
+stage "$R" crates/member/Cargo.toml "[package]
+name = \"member\"
+version = \"0.1.0\"
+
+[dependencies]
+other = { path = \"../other\" }
+"
+run_hook "$R"' \
+    "paths inside the repository, including from nested manifests, are allowed"
+noerror
+
+try 'mkrepo "$R" "$(manifest "")"
+stage "$R" crates/member/Cargo.toml "[package]
+name = \"member\"
+version = \"0.1.0\"
+
+[dev-dependencies]
+kal-log = { path = \"../../../kal-log\" }
+"
+run_hook "$R"' \
+    "a nested manifest escaping the repository is refused"
+is errlvl 1
+is err part '  crates/member/Cargo.toml: [dev-dependencies] kal-log = { path = "../../../kal-log" }'
+
+try 'mkrepo "$R" "$(manifest "")"
+stage "$R" Cargo.toml "$(manifest "[build-dependencies]
+a = { path = \"/opt/src/a\" }
+
+[target.x86_64-unknown-linux-gnu.dependencies]
+b = { path = \"../b\" }
+
+[workspace.dependencies]
+c = { path = \"../c\" }
+
+[patch.crates-io]
+d = { path = \"../d\" }")"
+run_hook "$R"' \
+    "every dependency table and absolute paths are checked"
+is errlvl 1
+is err part '  Cargo.toml: [build-dependencies] a = { path = "/opt/src/a" }
+  Cargo.toml: [patch.crates-io] d = { path = "../d" }
+  Cargo.toml: [target.x86_64-unknown-linux-gnu.dependencies] b = { path = "../b" }
+  Cargo.toml: [workspace.dependencies] c = { path = "../c" }
+'
+
+try 'rm -rf "$R"; mkdir -p "$R"; git -C "$R" init -q --template=
+stage "$R" Cargo.toml "$(manifest "[dependencies]
+kal-log = { path = \"../kal-log\" }")"
+run_hook "$R"' \
+    "the first commit of a repository is checked too"
+is errlvl 1
+is err part '  Cargo.toml: [dependencies] kal-log = { path = "../kal-log" }'
+
+try 'mkrepo "$R" "$(manifest "")"
+printf "%s" "$(lock "$reg_pkg")" > "$R/Cargo.lock"; g -C "$R" add Cargo.lock; g -C "$R" commit -q -m lock
+stage "$R" Cargo.lock "$(lock "$path_pkg")"
+run_hook "$R"' \
+    "a lockfile turning a registry crate into a local path package is refused"
+is errlvl 1
+is err part '  Cargo.lock: kal-log now locked as a local path package'
+
+try 'mkrepo "$R" "$(manifest "")"
+printf "%s" "$(lock "$path_pkg")" > "$R/Cargo.lock"; g -C "$R" add Cargo.lock; g -C "$R" commit -q -m lock
+stage "$R" Cargo.lock "$(lock "$reg_pkg")"
+run_hook "$R"' \
+    "a lockfile moving a crate from a local path to the registry passes"
+noerror
+
+try 'mkrepo "$R" "$(manifest "")"
+printf "%s" "$(lock "$path_pkg")" > "$R/Cargo.lock"; g -C "$R" add Cargo.lock; g -C "$R" commit -q -m lock
+stage "$R" Cargo.lock "$(lock "$path_pkg
+[[package]]
+name = \"log\"
+version = \"0.4.0\"
+source = \"registry+https://github.com/rust-lang/crates.io-index\"
+")"
+run_hook "$R"' \
+    "local path packages already locked as such pass"
+noerror
+
+try 'mkrepo "$R" "$(manifest "")"
+stage "$R" README.org "* readme"
+run_hook "$R"' \
+    "commits without Cargo files are not checked"
+noerror
+
+try 'export PKGCMD_CONFIG_PATH="$base/src/etc/pkgcmd.d"
+mkdir -p "$test_tmpdir/bin"; ln -sf "$base/src/bin/pkgcmd" "$test_tmpdir/bin/pkg-git-hook"
+mkrepo "$R" "$(manifest "")"
+stage "$R" Cargo.toml "$(manifest "[dependencies]
+kal-log = { path = \"../kal-log\" }")"
+(cd "$R" && unset NODE_ENV && PATH="$test_tmpdir/bin:$PATH" pkg-git-hook pre-commit)' \
+    "pkg-git-hook pre-commit runs the check"
+is errlvl 1
+is err part '  Cargo.toml: [dependencies] kal-log = { path = "../kal-log" }'

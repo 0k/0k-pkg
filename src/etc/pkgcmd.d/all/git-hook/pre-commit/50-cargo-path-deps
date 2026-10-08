@@ -1,0 +1,166 @@
+#!/bin/bash
+## ── Hard block: Cargo path dependencies leaving the repository ───────
+## A ``Cargo.toml`` dependency such as ``foo = { path = "../foo" }``
+## only resolves on a machine that has the sibling checkout at that
+## exact place: a fresh clone, CI or ``cargo publish`` cannot build it.
+## Local development against a sibling crate keeps that line
+## uncommitted (or uses a git-ignored ``[patch.crates-io]``); this check
+## stops it from being committed by accident.
+##
+## For every staged ``Cargo.toml`` (at any depth), the STAGED version is
+## parsed and each dependency carrying a ``path`` that resolves outside
+## the repository is compared with the HEAD version of the file.  Only
+## path dependencies the commit introduces (new, or with a new path) are
+## refused, so a repository that already committed some keeps working
+## until they are published.  Paths inside the repository (workspace
+## members) are fine.  Tables checked: ``[dependencies]``,
+## ``[dev-dependencies]``, ``[build-dependencies]``, their
+## ``[target.*]`` variants, ``[workspace.dependencies]`` and
+## ``[patch.*]``.
+##
+## For every staged ``Cargo.lock``, a crate that HEAD locked from a
+## registry or git source and that the staged lockfile records as a
+## local path package (its ``source`` and ``checksum`` lines removed) is
+## refused: that is the lockfile half of the same accident.
+##
+## Needs ``python3`` >= 3.11 (``tomllib``) or the ``tomli`` module, but
+## only when a ``Cargo.toml`` or ``Cargo.lock`` is staged.
+## Fires for ALL committers, no whitelist override.  Bypass with
+## ``git commit --no-verify`` if absolutely needed.
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR -- \
+             'Cargo.toml' '*/Cargo.toml' 'Cargo.lock' '*/Cargo.lock')
+[ -n "$staged" ] || exit 0
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo >&2 "BLOCKED: a Cargo.toml or Cargo.lock is staged, and checking it for"
+    echo >&2 "path dependencies needs 'python3', which is not on PATH."
+    echo >&2 "Bypass with --no-verify if you really must."
+    exit 1
+fi
+
+exec python3 - <<'EOF'
+import os, posixpath, subprocess, sys
+
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        sys.stderr.write(
+            "BLOCKED: a Cargo.toml or Cargo.lock is staged, and checking it for\n"
+            "path dependencies needs Python >= 3.11 (tomllib) or the 'tomli' module.\n"
+            "Bypass with --no-verify if you really must.\n")
+        sys.exit(1)
+
+DEP_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
+
+
+def git(*args):
+    return subprocess.run(("git",) + args, capture_output=True).stdout
+
+
+def load(spec):
+    """Parse the TOML blob ``spec`` (``HEAD:path``, ``:path``); None if absent or invalid."""
+    data = git("show", spec)
+    if not data:
+        return None
+    try:
+        return tomllib.loads(data.decode())
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        sys.stderr.write(f"warning: cannot parse {spec}: {e}\n")
+        return None
+
+
+def dep_entries(doc):
+    """Yield (table, name, entry) for every dependency-like entry of a manifest."""
+    for table in DEP_TABLES:
+        for name, entry in (doc.get(table) or {}).items():
+            yield table, name, entry
+    for target, tdoc in (doc.get("target") or {}).items():
+        for table in DEP_TABLES:
+            for name, entry in (tdoc.get(table) or {}).items():
+                yield f"target.{target}.{table}", name, entry
+    for name, entry in ((doc.get("workspace") or {}).get("dependencies") or {}).items():
+        yield "workspace.dependencies", name, entry
+    for source, deps in (doc.get("patch") or {}).items():
+        for name, entry in (deps or {}).items():
+            yield f"patch.{source}", name, entry
+
+
+def external_paths(doc, manifest_dir, root):
+    """Set of (table, name, path) whose ``path`` resolves outside the repository."""
+    found = set()
+    for table, name, entry in dep_entries(doc or {}):
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+            continue
+        path = entry["path"]
+        if os.path.isabs(path):
+            outside = os.path.relpath(os.path.normpath(path), root).startswith("..")
+        else:
+            norm = posixpath.normpath(posixpath.join(manifest_dir, path))
+            outside = norm == ".." or norm.startswith("../")
+        if outside:
+            found.add((table, name, path))
+    return found
+
+
+def lock_sources(doc):
+    """Map crate name -> set of sources (None for local path packages)."""
+    sources = {}
+    for pkg in (doc or {}).get("package", []):
+        sources.setdefault(pkg.get("name"), set()).add(pkg.get("source"))
+    return sources
+
+
+root = git("rev-parse", "--show-toplevel").decode().strip()
+has_head = subprocess.run(("git", "rev-parse", "--verify", "-q", "HEAD"),
+                          capture_output=True).returncode == 0
+status = git("diff", "--cached", "--name-status", "-M", "-z",
+             "--diff-filter=ACMR").decode().split("\0")
+
+problems = []
+i = 0
+while i < len(status) - 1:
+    code = status[i]
+    if code.startswith("R"):
+        old, new = status[i + 1], status[i + 2]
+        i += 3
+    else:
+        old = new = status[i + 1]
+        i += 2
+    base = posixpath.basename(new)
+    head_spec = f"HEAD:{old}" if has_head and not code.startswith("A") else None
+    if base == "Cargo.toml":
+        staged = external_paths(load(f":{new}"), posixpath.dirname(new), root)
+        before = external_paths(load(head_spec), posixpath.dirname(old), root) if head_spec else set()
+        for table, name, path in sorted(staged - before):
+            problems.append(f"  {new}: [{table}] {name} = {{ path = \"{path}\" }}")
+    elif base == "Cargo.lock" and head_spec:
+        staged = lock_sources(load(f":{new}"))
+        before = lock_sources(load(head_spec))
+        for name in sorted(n for n in staged if n is not None):
+            if (None in staged[name] and name in before
+                    and None not in before[name]):
+                problems.append(f"  {new}: {name} now locked as a local path package"
+                                " (its 'source'/'checksum' lines were removed)")
+
+if problems:
+    sys.stderr.write("BLOCKED: staged changes add Cargo path dependencies outside the repository:\n")
+    sys.stderr.write("\n".join(problems) + "\n")
+    sys.stderr.write("""
+A path outside the repository only exists on this machine: a fresh
+clone, CI or ``cargo publish`` cannot resolve it.  Commit a published
+version instead (``foo = "0.1"``).  To build against a local checkout,
+keep the path line uncommitted, or put a ``[patch.crates-io]`` entry in a
+git-ignored ``.cargo/config.toml``.
+
+Fix: unstage those hunks (the working tree is left as is):
+
+  git reset -p HEAD -- Cargo.toml Cargo.lock
+
+(LLM agents: do NOT bypass with --no-verify; unstage the path hunks.)
+""")
+    sys.exit(1)
+EOF

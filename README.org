@@ -323,9 +323,20 @@ Checks shipped for the ~all~ package type:
 | ~pre-commit~ | ~10-readme-md~        | Block ~README.md~ when ~README.org~ exists                     |
 | ~pre-commit~ | ~20-opencode-paths~   | OpenCode sessions: block ~doc/admin.org~, ~.sisyphus/~, ~*.md~ |
 | ~pre-commit~ | ~30-org-clock~        | ~org-cli clock check~ on staged ~*.org~                        |
+| ~pre-commit~ | ~50-cargo-path-deps~  | Block new Cargo ~path~ dependencies leaving the repository     |
 | ~commit-msg~ | ~10-opencode-msg~     | OpenCode sessions: block ~Co-authored-by~ / "Ultraworked"      |
 | ~commit-msg~ | ~20-convention~       | Commit message convention audit                                |
 | ~commit-msg~ | ~90-assisted-by~      | Add ~Assisted-by:~ trailer from ~ai-audit~                     |
+
+~50-cargo-path-deps~ refuses a commit whose staged ~Cargo.toml~ (at any
+depth) adds a dependency, or a ~[patch.*]~ entry, whose ~path~ resolves
+outside the repository (~foo = { path = "../foo" }~), and a staged
+~Cargo.lock~ that turns a crate locked from a registry or git at
+~HEAD~ into a local path package.  Path dependencies already committed
+and paths inside the repository (workspace members) are accepted.
+Keep such a line uncommitted, or use a git-ignored ~[patch.crates-io]~,
+to build against a local checkout.  It needs ~python3~ >= 3.11 (or
+~tomli~), only when a Cargo file is staged.
 
 ~20-convention~ requires the first word of a title's description to
 be an imperative verb listed in ~git-hook/commit-msg/verbs.txt~ (one
