@@ -1,0 +1,40 @@
+#!/bin/bash
+## -*- mode: shell-script -*-
+##
+## ``README.org`` must carry the crate's title, registry/documentation links,
+## and installation instructions before a release can proceed.
+##
+
+Wrap -v -s -d "Check README.org release metadata" <<'EOF' || exit 1
+if [ ! -f README.org ]; then
+    echo 'Skipping: no README.org (checked elsewhere).' >&2
+    exit 0
+fi
+name=$(toml get -r Cargo.toml package.name) || {
+    echo 'Error: cannot read package.name; fix Cargo.toml or install toml.' >&2
+    exit 1
+}
+[ -n "$name" ] || { echo 'Error: package.name is empty in Cargo.toml.' >&2; exit 1; }
+error=0
+if ! grep -qi '^#+TITLE:' README.org; then
+    echo 'Error: missing title; add #+TITLE: <project title> to README.org.' >&2
+    error=1
+fi
+## Cargo names contain only letters, numbers, underscores and hyphens, so
+## they are literal in these regex positions. Require a token boundary.
+if ! grep -Eq "crates[.]io/crates/$name([^[:alnum:]_-]|$)" README.org; then
+    echo "Error: missing crates.io badge/link; add https://crates.io/crates/$name to README.org." >&2
+    error=1
+fi
+if [ -f src/lib.rs ] || grep -Eq '^[[:space:]]*\[lib\][[:space:]]*(#.*)?$' Cargo.toml; then
+    if ! grep -Eq "docs[.]rs/$name([^[:alnum:]_-]|$)" README.org; then
+        echo "Error: missing docs.rs badge/link; add https://docs.rs/$name to README.org." >&2
+        error=1
+    fi
+fi
+if ! grep -Eq "cargo[[:space:]]+(add|install)[[:space:]]+$name([^[:alnum:]_-]|$)|(^|[^[:alnum:]_-])$name[[:space:]]*=" README.org; then
+    echo "Error: missing install instructions; add cargo add $name, cargo install $name, or $name = \"<version>\" to README.org." >&2
+    error=1
+fi
+exit "$error"
+EOF

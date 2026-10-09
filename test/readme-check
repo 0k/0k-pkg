@@ -1,0 +1,66 @@
+# -*- mode: shell-script -*-
+## sunit evaluates the quoted test commands later, in its fixture shell.
+# shellcheck disable=SC2016
+exname=$(basename "$0")
+export exname prefix_cmd
+prefix_cmd='
+cd "$test_tmpdir/proj"
+. /etc/shlib
+include pretty
+export VERBOSE=1
+. "$base/src/bin/pkgcmd"
+'
+check='. "$base/src/etc/pkgcmd.d/cargo/source/check/readme"'
+setup() {
+    rm -rf "${test_tmpdir:?}/proj"
+    mkdir -p "$test_tmpdir/proj/src"
+    cat > "$test_tmpdir/proj/Cargo.toml" <<'EOF'
+[package]
+name = "fx"
+version = "%%version%%"
+EOF
+    touch "$test_tmpdir/proj/src/lib.rs"
+    cat > "$test_tmpdir/proj/README.org" <<'EOF'
+#+TITLE: Fixture
+[[https://crates.io/crates/fx][crates.io]]
+[[https://docs.rs/fx][docs.rs]]
+cargo add fx
+EOF
+}
+try "$check" 'complete library README passes with version placeholder'
+is errlvl 0
+try 'sed -i /TITLE/d README.org; '"$check" 'missing title fails with fix'
+is errlvl 1
+is out part '#+TITLE:'
+try 'sed -i /crates.io/d README.org; '"$check" 'missing crates.io badge fails with fix'
+is errlvl 1
+is out part 'crates.io/crates/fx'
+try 'sed -i /docs.rs/d README.org; '"$check" 'missing library docs link fails with fix'
+is errlvl 1
+is out part 'docs.rs/fx'
+try 'sed -i /cargo/d README.org; '"$check" 'missing install instruction fails with fix'
+is errlvl 1
+is out part 'cargo add fx'
+try 'printf "" > README.org; '"$check" 'all missing items are reported together'
+is errlvl 1
+is out part '#+TITLE:'
+is out part 'crates.io/crates/fx'
+is out part 'docs.rs/fx'
+is out part 'cargo add fx'
+try 'rm src/lib.rs; sed -i /docs.rs/d README.org; '"$check" 'binary-only crate needs no docs.rs link'
+is errlvl 0
+try 'rm src/lib.rs; printf "\n[lib]\npath = \"custom.rs\"\n" >> Cargo.toml; sed -i /docs.rs/d README.org; '"$check" 'explicit library target requires docs.rs link'
+is errlvl 1
+is out part 'docs.rs/fx'
+try 'sed -i "s/cargo add fx/cargo install fx/" README.org; '"$check" 'cargo install counts as installation'
+is errlvl 0
+try 'sed -i "s/cargo add fx/fx = { version = \"1\" }/" README.org; '"$check" 'dependency table counts as installation'
+is errlvl 0
+try 'sed -i "s@crates/fx@crates/fx-other@;s@docs.rs/fx@docs.rs/fx-other@;s/cargo add fx/cargo add fx-other/" README.org; '"$check" 'links and instructions must name this crate, not a prefix match'
+is errlvl 1
+is out part 'crates.io/crates/fx'
+is out part 'docs.rs/fx'
+is out part 'cargo add fx'
+try 'rm README.org; '"$check" 'absent README skips with info'
+is errlvl 0
+is out part 'Skipping'
