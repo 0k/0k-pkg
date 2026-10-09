@@ -1,0 +1,87 @@
+# -*- mode: shell-script -*-
+## sunit evaluates the quoted test commands later, in its fixture shell.
+# shellcheck disable=SC2016
+## Use real pandoc and deterministic markdown from a fake gitchangelog.
+exname=$(basename "$0")
+export exname prefix_cmd
+prefix_cmd='
+cd "$test_tmpdir/proj"
+export PATH="$test_tmpdir/bin:$PATH"
+depends_soft() { command -v "$1" >/dev/null; }
+export -f depends_soft
+'
+setup() {
+    rm -rf "${test_tmpdir:?}/proj" "${test_tmpdir:?}/bin"
+    mkdir -p "$test_tmpdir/proj" "$test_tmpdir/bin"
+    cat > "$test_tmpdir/proj/README.org" <<'EOF'
+* Usage
+** Example
+#+begin_src rust :no_run yes
+fn main() {}
+#+end_src
+EOF
+    touch "$test_tmpdir/proj/.gitchangelog.rc"
+    cat > "$test_tmpdir/bin/gitchangelog" <<'EOF'
+#!/bin/bash
+cat <<'MD'
+# Changelog
+## 1.2.0
+### Changes
+```markdown
+# example, not a heading
+```
+~~~markdown
+## another example
+~~~
+MD
+EOF
+    chmod +x "$test_tmpdir/bin/gitchangelog"
+}
+try 'sed -i "1i #+TITLE: Fixture" README.org
+. "$base/src/etc/pkgcmd.d/cargo/autogen.d/20-org-to-md.sh" >/dev/null
+cat README.md' 'title becomes first H1; body and changelog shift, fenced code stays unchanged'
+is errlvl 0
+is out '# Fixture
+
+## Usage
+
+### Example
+
+```rust,no_run
+fn main() {}
+```
+
+
+## Changelog
+### 1.2.0
+#### Changes
+```markdown
+# example, not a heading
+```
+~~~markdown
+## another example
+~~~' TRIM
+
+## Compare the untitled document to the exact original conversion pipeline,
+## not to a duplicated filter: read the committed version from git.
+try 'git -C "$base" show HEAD:src/etc/pkgcmd.d/cargo/autogen.d/20-org-to-md.sh > "$test_tmpdir/original.sh"
+. "$test_tmpdir/original.sh" >/dev/null && cp README.md "$test_tmpdir/expected"
+. "$base/src/etc/pkgcmd.d/cargo/autogen.d/20-org-to-md.sh" >/dev/null
+cmp "$test_tmpdir/expected" README.md' 'without a title README output remains byte-identical to HEAD'
+is errlvl 0
+
+try 'sed -i "1i #+TITLE: Fixture" README.org
+gitchangelog > CHANGELOG.md
+depends_soft() { [ "$1" != gitchangelog ] && command -v "$1" >/dev/null; }
+. "$base/src/etc/pkgcmd.d/cargo/autogen.d/20-org-to-md.sh" >/dev/null
+sed -n "/Changelog/,\$p" README.md' 'title also shifts fallback CHANGELOG.md headings without touching fenced examples'
+is errlvl 0
+is out '## Changelog
+### 1.2.0
+#### Changes
+```markdown
+# example, not a heading
+```
+~~~markdown
+## another example
+~~~' TRIM
