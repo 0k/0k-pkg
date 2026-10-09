@@ -35,7 +35,7 @@ workflows regardless of the underlying technology.
 | hatch      | ~pyproject.toml~ with ~hatchling~ + ~hatch-vcs~ | wheel, sdist → PyPI | pdb/rst checks; ~25-changelog.sh~ |
 | python     | ~setup.py~           | wheel, sdist → PyPI    | pdb/rst checks; flake8 lint; ~25-changelog.sh~ |
 | npm        | ~package.json~       | npm pack → npm         | transpile check                          |
-| ts         | ~tsconfig.json~      | npm pack → npm         | transpile check                          |
+| ts         | ~tsconfig.json~      | npm pack → npm         | transpile check; ~20-org-to-md.sh~       |
 | kal-sh     | ~pkg/~ + ~test/test~ | deb                    | -                                        |
 | charm      | ~metadata.yml~       | -                      | -                                        |
 
@@ -151,6 +151,7 @@ project (see each plugin's ~autogen.d/~ directory):
 | ~cargo~   | ~20-org-to-md.sh~     | ~README.org~ → ~README.md~ (pandoc) + changelog appended, since crates.io only renders the README |
 | ~hatch~   | ~25-changelog.sh~     | ~CHANGELOG.rst~ from git history (gitchangelog)       |
 | ~python~  | ~25-changelog.sh~     | idem                                                  |
+| ~ts~      | ~20-org-to-md.sh~     | ~README.org~ → ~README.md~ (pandoc) + changelog appended, since npmjs.com only renders the README |
 
 Provenance is written to ~.package.d/autogen.d/MANIFEST~ (source
 commit and a sha256 per file).  Commit the vendored files together

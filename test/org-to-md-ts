@@ -1,0 +1,96 @@
+# -*- mode: shell-script -*-
+## sunit evaluates the quoted test commands later, in its fixture shell.
+# shellcheck disable=SC2016
+## ``ts/autogen.d/20-org-to-md.sh``: the README page npmjs.com shows.
+## Use real pandoc and deterministic markdown from a fake gitchangelog.
+exname=$(basename "$0")
+export exname prefix_cmd
+prefix_cmd='
+cd "$test_tmpdir/proj"
+export PATH="$test_tmpdir/bin:$PATH"
+depends_soft() { command -v "$1" >/dev/null; }
+export -f depends_soft
+script="$base/src/etc/pkgcmd.d/ts/autogen.d/20-org-to-md.sh"
+'
+setup() {
+    rm -rf "${test_tmpdir:?}/proj" "${test_tmpdir:?}/bin"
+    mkdir -p "$test_tmpdir/proj" "$test_tmpdir/bin"
+    cat > "$test_tmpdir/proj/README.org" <<'EOF'
+* Usage
+| Prop | Type   |
+|------+--------|
+| ~to~ | number |
+#+begin_src typescript
+const x = 1
+#+end_src
+EOF
+    touch "$test_tmpdir/proj/.gitchangelog.rc"
+    cat > "$test_tmpdir/bin/gitchangelog" <<'EOF'
+#!/bin/bash
+cat <<'MD'
+# Changelog
+## 0.1.0
+```markdown
+# example, not a heading
+```
+MD
+EOF
+    chmod +x "$test_tmpdir/bin/gitchangelog"
+}
+
+try 'sed -i "1i #+TITLE: Fixture" README.org
+. "$script" >/dev/null
+cat README.md' 'upper-case title becomes the only H1; body and changelog shift, fences and tables stay'
+is errlvl 0
+is out '# Fixture
+
+## Usage
+
+| Prop | Type   |
+|------|--------|
+| `to` | number |
+
+``` typescript
+const x = 1
+```
+
+
+## Changelog
+### 0.1.0
+```markdown
+# example, not a heading
+```' TRIM
+
+try 'sed -i "1i #+title: Fixture" README.org
+. "$script" >/dev/null
+head -3 README.md' 'lower-case title is recognised too'
+is errlvl 0
+is out '# Fixture
+
+## Usage' TRIM
+
+try '. "$script" >/dev/null
+head -1 README.md' 'without a title, org headings stay at level one'
+is errlvl 0
+is out '# Usage' TRIM
+
+try 'rm .gitchangelog.rc
+. "$script" 2>&1 >/dev/null
+grep -c Changelog README.md' 'without .gitchangelog.rc the changelog is skipped with a warning'
+is errlvl 1
+is out 'No .gitchangelog.rc found: changelog not appended to README.md.
+Updating README.md
+0' TRIM
+
+try 'gitchangelog > CHANGELOG.md
+rm .gitchangelog.rc
+depends_soft() { [ "$1" != gitchangelog ] && command -v "$1" >/dev/null; }
+sed -i "1i #+TITLE: Fixture" README.org
+. "$script" >/dev/null
+sed -n "/Changelog/,\$p" README.md' 'falls back to an existing CHANGELOG.md, shifted under the title'
+is errlvl 0
+is out '## Changelog
+### 0.1.0
+```markdown
+# example, not a heading
+```' TRIM
