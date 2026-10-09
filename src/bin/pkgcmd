@@ -117,6 +117,51 @@ pkg._list_plugin_files() {
     done
 }
 
+## Publish first, then plugin post-publish hooks, then project hooks.
+## Called in the release workdir by ``pkg-common``. Keep discovery failures
+## visible by materialising lists instead of hiding them in process substitutions.
+pkg._publish() (
+    set -o pipefail
+    export LC_ALL=C
+    local lists script _plugin has_run=
+    lists=$(mktemp -d) || return 1
+    trap 'rm -rf "$lists"' EXIT
+    pkg._list_scripts release/publish > "$lists/publish" || return 1
+    while read-0 script; do
+        has_run=1
+        "$script" || {
+            err "Publish script failed: $script"
+            return 1
+        }
+    done < "$lists/publish"
+    if [ -z "$has_run" ]; then
+        err "No publish instructions found."
+        return 1
+    fi
+
+    pkg._list_plugin_files release/post-publish.d > "$lists/plugins" || return 1
+    while read-0 _plugin script; do
+        [ -x "$script" ] || continue
+        p0 "$script"
+    done < "$lists/plugins" > "$lists/hooks"
+    sort -zu "$lists/hooks" -o "$lists/hooks" || return 1
+    while read-0 script; do
+        "$script" || {
+            err "Post-publish hook failed: $script"
+            return 1
+        }
+    done < "$lists/hooks"
+    for script in .package.d/release/post-publish.d/*; do
+        [ -f "$script" ] || continue
+        [ -x "$script" ] || continue
+        "$script" || {
+            err "Post-publish hook failed: $script"
+            return 1
+        }
+    done
+    return 0
+)
+
 pkg._list_cmd_alternatives() {
     ## could be cached
     declare -F | egrep '^declare -fx? pkgcmd:[^:]+:[^:]+:run$' |

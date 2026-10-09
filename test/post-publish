@@ -1,0 +1,58 @@
+# -*- mode: shell-script -*-
+## sunit evaluates the quoted test commands later, in its fixture shell.
+# shellcheck disable=SC2016
+## Exercise the orchestration helper with real plugin discovery and fake scripts.
+exname=$(basename "$0")
+export exname prefix_cmd
+prefix_cmd='
+cd "$test_tmpdir/proj"
+export PKGCMD_CONFIG_PATH="$test_tmpdir/plugins" PKGCMD_ALTERNATIVES="zeta alpha" LOG="$test_tmpdir/log"
+. "$base/src/bin/pkgcmd"
+pkg._publish
+rc=$?
+cat "$LOG"
+exit "$rc"
+'
+setup() {
+    rm -rf "${test_tmpdir:?}/proj" "$test_tmpdir/plugins" "$test_tmpdir/log"
+    mkdir -p "$test_tmpdir/proj/.package.d/release/post-publish.d" \
+        "$test_tmpdir/plugins/alpha/release/publish" \
+        "$test_tmpdir/plugins/alpha/release/post-publish.d" \
+        "$test_tmpdir/plugins/zeta/release/post-publish.d"
+    local path
+    for path in alpha/release/publish/publish alpha/release/post-publish.d/20-hook zeta/release/post-publish.d/10-hook; do
+        printf '#!/bin/bash\nprintf "%%s\\n" "%s" >> "$LOG"\n' "$path" > "$test_tmpdir/plugins/$path"
+        chmod +x "$test_tmpdir/plugins/$path"
+    done
+    printf '#!/bin/bash\necho project >> "$LOG"\n' > "$test_tmpdir/proj/.package.d/release/post-publish.d/10-hook"
+    chmod +x "$test_tmpdir/proj/.package.d/release/post-publish.d/10-hook"
+    echo ignored > "$test_tmpdir/plugins/alpha/release/post-publish.d/00-disabled"
+}
+try ':' 'publish then sorted plugin hooks then project hooks exactly once'
+is errlvl 0
+is out 'alpha/release/publish/publish
+alpha/release/post-publish.d/20-hook
+zeta/release/post-publish.d/10-hook
+project' TRIM
+
+prefix_cmd='
+cd "$test_tmpdir/proj"
+export PKGCMD_CONFIG_PATH="$test_tmpdir/plugins" PKGCMD_ALTERNATIVES="zeta alpha" LOG="$test_tmpdir/log"
+. "$base/src/bin/pkgcmd"
+'
+try 'echo "exit 7" >> "$test_tmpdir/plugins/alpha/release/post-publish.d/20-hook"
+pkg._publish; rc=$?; cat "$LOG"; exit "$rc"' 'failed plugin hook fails publishing before project hooks'
+is errlvl 1
+is err part '20-hook'
+is out 'alpha/release/publish/publish
+alpha/release/post-publish.d/20-hook' TRIM
+try 'echo "exit 7" >> .package.d/release/post-publish.d/10-hook; pkg._publish' 'failed project hook fails publishing'
+is errlvl 1
+is err part '.package.d/release/post-publish.d/10-hook'
+try 'echo "exit 7" >> "$test_tmpdir/plugins/alpha/release/publish/publish"
+pkg._publish; rc=$?; cat "$LOG"; exit "$rc"' 'failed publisher runs no post-publish hooks'
+is errlvl 1
+is out 'alpha/release/publish/publish' TRIM
+try 'rm "$test_tmpdir/plugins/alpha/release/publish/publish"; pkg._publish' 'no publisher is a failure'
+is errlvl 1
+is err part 'No publish instructions found'

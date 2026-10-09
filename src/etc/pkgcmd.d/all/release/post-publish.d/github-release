@@ -1,0 +1,81 @@
+#!/bin/bash
+##
+## Create a GitHub release after publishing, without modifying existing releases.
+## ``.package.d/release/assets.d/*`` executables receive one output directory;
+## write regular files there to upload. ``VERSION`` and ``pkg_name`` are exported
+## for asset naming/builds. Assets are project-specific; this hook is not vendored.
+## Requires ``gh`` (authenticated) and ``gitchangelog`` with markdown output.
+##
+
+set -eu -o pipefail
+export LC_ALL=C
+die() { echo "Error: $*" >&2; exit 1; }
+info() { echo "$*" >&2; }
+
+VERSION=$(git describe --tags --exact-match HEAD 2>/dev/null) || {
+    info 'HEAD is not on a tag, skipping GitHub release'
+    exit 0
+}
+origin=$(git remote get-url origin) || die 'Cannot read origin; configure a GitHub origin remote.'
+if [ -d "$origin" ]; then
+    origin=$(git -C "$origin" remote get-url origin) || die 'Cannot read the source repository origin.'
+fi
+case "$origin" in
+    git@github.com:*) repo=${origin#git@github.com:} ;;
+    ssh://git@github.com/*) repo=${origin#ssh://git@github.com/} ;;
+    https://github.com/*) repo=${origin#https://github.com/} ;;
+    *) info 'not a GitHub repository, skipping'; exit 0 ;;
+esac
+repo=${repo%/}
+repo=${repo%.git}
+[[ "$repo" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]] || die "Invalid GitHub owner/repo in origin '$origin'."
+command -v gh >/dev/null || die 'gh is required; install GitHub CLI and run gh auth login.'
+
+tmp=$(mktemp -d) || die 'Cannot create temporary release directory.'
+trap 'rm -rf "$tmp"' EXIT
+if gh release view "$VERSION" --repo "$repo" > /dev/null 2> "$tmp/view-error"; then
+    info "GitHub release $VERSION already exists"
+    exit 0
+else
+    status=$?
+    ## ``gh`` reports an absent release with exit 1; auth/network errors must
+    ## not be mistaken for absence (which would authorize release creation).
+    if [ "$status" -ne 1 ] || ! grep -qi 'release not found' "$tmp/view-error"; then
+        cat "$tmp/view-error" >&2
+        die "gh release view failed for $repo/$VERSION; check authentication and connectivity."
+    fi
+fi
+command -v gitchangelog >/dev/null || die 'gitchangelog is required; install it and configure markdown output in .gitchangelog.rc.'
+
+git tag -l | sort -V > "$tmp/tags" || die 'Cannot enumerate release tags.'
+PREV=
+while IFS= read -r tag; do
+    [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+    [ "$tag" != "$VERSION" ] || continue
+    first=$(printf '%s\n%s\n' "$tag" "$VERSION" | sort -V | sed -n '1p')
+    [ "$first" != "$tag" ] || PREV=$tag
+done < "$tmp/tags"
+if [ -n "$PREV" ]; then
+    gitchangelog "$PREV..$VERSION" > "$tmp/changelog" || die 'gitchangelog failed; fix .gitchangelog.rc or the release tag range.'
+else
+    gitchangelog > "$tmp/changelog" || die 'gitchangelog failed; fix .gitchangelog.rc before publishing.'
+fi
+NOTES=$(sed '1d' "$tmp/changelog")
+[[ "$NOTES" =~ [^[:space:]] ]] || die 'gitchangelog produced empty release notes; fix .gitchangelog.rc before publishing.'
+
+## ``pkg-common`` supplies ``pkg_name``; preserve it rather than guessing one.
+export VERSION pkg_name
+mkdir "$tmp/assets"
+for script in .package.d/release/assets.d/*; do
+    [ -f "$script" ] || continue
+    [ -x "$script" ] || continue
+    "$script" "$tmp/assets" || die "Asset script failed: $script"
+done
+assets=()
+## Include dotfiles and nested regular files, with NUL-safe deterministic order.
+find "$tmp/assets" -type f -print0 | sort -z > "$tmp/assets-list" || die 'Cannot enumerate release assets.'
+while IFS= read -r -d '' file; do
+    assets+=("$file")
+done < "$tmp/assets-list"
+gh release create "$VERSION" --repo "$repo" --title "$VERSION" --notes "$NOTES" "${assets[@]}" ||
+    die "gh release create failed for $repo/$VERSION."

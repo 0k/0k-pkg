@@ -1175,84 +1175,8 @@ if [ -n "$publish" ]; then
             die "Release are allowed only on same name tags (current version: $pkg_version)"
         fi
         Section Publishing
-
-        has_run=
-        while read-0 script; do
-            has_run=1
-            "$script" || exit 1
-        done < <(pkg._list_scripts release/publish)
-        if [ -z "$has_run" ]; then
-            err "No publish instructions found."
-            exit 1
-        fi
-
-
-    )
-
-#     (
-#         depends pandoc
-#         overlay-setup || exit 1
-#         trap_add EXIT "overlay-teardown || {
-#             err \"Couldn't remove overlay on '$workdir' properly.\"
-#             exit 101
-#         }"
-#         remote_origin_url=$(git remote get-url origin)
-#         if [[ "$remote_origin_url" == "git@github.com:"* ]]; then
-#             git_hub=${remote_origin_url##*:}
-#             GITHUB_OWNER=${git_hub%%/*}
-#             GITHUB_PROJECT=$(basename "${git_hub##*/}" .git)
-#             GITHUB_TOKEN=$(pkg.config get-value github.token) || {
-#                 die "You must provide a github access token in pkg's config file."
-#             }
-#             export GITHUB_TOKEN
-#             cd "$workdir"
-#             variable_get
-#             Wrap -d "Creating/Updating github release" <<EOF || exit 1
-
-#                 description="\$(set -o pipefail;
-#                     ./autogen.sh --get-release-changes |
-#                         pandoc -f rst -t markdown_github --base-header-level=2)" || exit 1
-
-#                 github-release release \
-#                     --user "$GITHUB_OWNER" \
-#                     --repo "$GITHUB_PROJECT" \
-#                     --tag "$pkg_version" \
-#                     --name "$pkg_version" \
-#                     --description "\$description" \
-#                     --draft \
-#                     $([ "$STATUS" != "stable" ] && "--pre-release") || exit 1
-
-#                 (
-#                     cd "$build"
-#                     for file in "$pkg_version/"*; do
-#                         [ -e "\$file" ] || {
-#                             echo "Error: '\$file' is not a file."
-#                             exit 1
-#                         }
-#                         github-release upload \
-#                             --user "$GITHUB_OWNER" \
-#                             --repo "$GITHUB_PROJECT" \
-#                             --tag "$pkg_version" \
-#                             --name "\$(basename \$file)" \
-#                             --file $file || exit \$?
-#                     done
-#                 )
-
-# EOF
-
-#         fi
-#     )
-
-# /$pkg_version/assets?name=foo.zip'  \
-# -H "Authorization: token TOKEN"
-# --header 'Content-Type: application/zip' --upload-file test.zip -X POST
-
-
-
-#     fi
-
-
-#     curl 'https://api.github.com/repos/owner/my_repo/releases/:id/assets?access_token=acces_token&name=foo.zip' --header 'Content-Type: application/zip' --upload-file test.zip -X POST
+        pkg._publish || exit 1
+    ) || exit 1
 
 else
     (

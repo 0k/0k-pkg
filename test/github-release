@@ -1,0 +1,130 @@
+# -*- mode: shell-script -*-
+## sunit evaluates the quoted test commands later, in its fixture shell.
+# shellcheck disable=SC2016
+## GitHub releases use fake remote commands; git repositories stay in sunit's sandbox.
+exname=$(basename "$0")
+export exname prefix_cmd
+prefix_cmd='
+cd "$test_tmpdir/proj"
+export PATH="$test_tmpdir/bin:$PATH" LOG="$test_tmpdir/log" TMPDIR="$test_tmpdir/tmp"
+export pkg_name=fx
+hook="$base/src/etc/pkgcmd.d/all/release/post-publish.d/github-release"
+'
+
+setup() {
+    rm -rf "${test_tmpdir:?}/proj" "${test_tmpdir:?}/bin" "$test_tmpdir/tmp" "$test_tmpdir/log"
+    mkdir -p "$test_tmpdir/proj" "$test_tmpdir/bin" "$test_tmpdir/tmp"
+    (
+        cd "$test_tmpdir/proj" || exit 1
+        git -c init.defaultBranch=main init -q
+        git -c core.hooksPath=/dev/null -c user.name=Tester -c user.email=t@example.com commit -q --allow-empty -m 'new: first release'
+        git -c core.hooksPath=/dev/null -c user.name=Tester -c user.email=t@example.com commit -q --allow-empty -m 'chg: release changes'
+        git tag 1.2.0
+        git remote add origin git@github.com:owner/fx.git
+    )
+    cat > "$test_tmpdir/bin/gh" <<'EOF'
+#!/bin/bash
+printf 'gh' >> "$LOG"
+printf ' <%s>' "$@" >> "$LOG"
+printf '\n' >> "$LOG"
+if [ "$2" = view ]; then
+    if [ "${EXISTS:-}" = yes ]; then exit 0; fi
+    if [ "${VIEW_FAIL:-}" = yes ]; then echo 'authentication failed' >&2; exit 4; fi
+    echo 'release not found' >&2
+    exit 1
+fi
+[ "${CREATE_FAIL:-}" != yes ] || exit 1
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = --notes ]; then printf '%s\n' "$2" > "$LOG.notes"; fi
+    if [ -f "$1" ]; then printf 'asset=%s\n' "${1##*/}" >> "$LOG"; cat "$1" >> "$LOG"; fi
+    shift
+done
+echo 'https://github.com/owner/fx/releases/tag/1.2.0'
+EOF
+    cat > "$test_tmpdir/bin/gitchangelog" <<'EOF'
+#!/bin/bash
+printf 'changelog' >> "$LOG"
+printf ' <%s>' "$@" >> "$LOG"
+printf '\n' >> "$LOG"
+[ "${CHANGELOG_FAIL:-}" != yes ] || exit 1
+[ "${CHANGELOG_EMPTY:-}" != yes ] || { printf '# Changelog\n'; exit 0; }
+printf '# Changelog\n\n## 1.2.0\n\nRelease notes.\n'
+EOF
+    chmod +x "$test_tmpdir/bin/gh" "$test_tmpdir/bin/gitchangelog"
+}
+
+try '"$hook" && cat "$LOG" && cat "$LOG.notes"' 'creates release with exact notes and explicit repo/title'
+is errlvl 0
+is out part 'gh <release> <create> <1.2.0> <--repo> <owner/fx> <--title> <1.2.0> <--notes>'
+is out part 'https://github.com/owner/fx/releases/tag/1.2.0'
+is out part '## 1.2.0'
+try '"$hook" >/dev/null && diff "$LOG.notes" <(printf "\n## 1.2.0\n\nRelease notes.\n")' 'drops only the changelog title'
+is errlvl 0
+
+try 'EXISTS=yes "$hook" && cat "$LOG"' 'existing release is never changed'
+is errlvl 0
+is err part 'GitHub release 1.2.0 already exists'
+is out 'gh <release> <view> <1.2.0> <--repo> <owner/fx>' TRIM
+
+try 'git remote set-url origin https://example.org/owner/fx; "$hook"; [ ! -f "$LOG" ]' 'non-GitHub repository skips before remote calls'
+is errlvl 0
+is err part 'not a GitHub repository, skipping'
+try 'git tag -d 1.2.0 >/dev/null; "$hook"; [ ! -f "$LOG" ]' 'untagged HEAD skips before remote calls'
+is errlvl 0
+is err part 'not on a tag'
+
+try 'for url in ssh://git@github.com/owner/fx.git https://github.com/owner/fx.git git@github.com:owner/fx; do
+git remote set-url origin "$url"; "$hook" >/dev/null || exit 1
+done
+grep -c "<--repo> <owner/fx>" "$LOG"' 'accepts all three GitHub URL forms'
+is errlvl 0
+is out '6' TRIM
+try 'git clone -q . "$test_tmpdir/clone" && cd "$test_tmpdir/clone" && "$hook" && cat "$LOG"' 'follows one local origin hop'
+is errlvl 0
+is out part '<--repo> <owner/fx>'
+
+try 'git tag 1.0.0 HEAD^; git tag 1.1.9 HEAD^; git tag 1.10.0 HEAD^; git tag v1.1.99 HEAD^; "$hook" >/dev/null && cat "$LOG"' 'highest lower semver tag supplies the notes range'
+is errlvl 0
+is out part 'changelog <1.1.9..1.2.0>'
+
+try 'mkdir -p .package.d/release/assets.d
+printf "#!/bin/bash\necho script-20 >> \"\$LOG\"\nprintf '\''%%s:%%s\\n'\'' \"\$VERSION\" \"\$pkg_name\" > \"\$1/binary file\"\n" > .package.d/release/assets.d/20-binary
+printf "#!/bin/bash\necho script-10 >> \"\$LOG\"\necho first > \"\$1/checksum\"\nmkdir \"\$1/nested\"; echo hidden > \"\$1/nested/.hidden\"\n" > .package.d/release/assets.d/10-checksum
+echo ignored > .package.d/release/assets.d/30-disabled
+chmod +x .package.d/release/assets.d/{10-checksum,20-binary}
+"$hook" >/dev/null && cat "$LOG" && [ -z "$(ls -A "$TMPDIR")" ]' 'uploads regular assets with exported version/name and cleans output directory'
+is errlvl 0
+is out part 'asset=binary file
+1.2.0:fx'
+is out part 'asset=checksum
+first'
+is out part 'script-10
+script-20'
+is out part 'asset=.hidden
+hidden'
+
+try 'mkdir -p .package.d/release/assets.d; printf "#!/bin/bash\nexit 7\n" > .package.d/release/assets.d/broken; chmod +x .package.d/release/assets.d/broken
+"$hook"; rc=$?; [ -z "$(ls -A "$TMPDIR")" ] || exit 99; exit "$rc"' 'asset failure fails release and cleans output directory'
+is errlvl 1
+is err part 'broken'
+try 'CHANGELOG_FAIL=yes "$hook"' 'changelog failure is actionable and fatal'
+is errlvl 1
+is err part 'gitchangelog'
+try 'CHANGELOG_EMPTY=yes "$hook"; rc=$?; grep -q "<create>" "$LOG" && exit 99; exit "$rc"' 'empty notes fail before creating a release'
+is errlvl 1
+is err part 'empty release notes'
+try 'mkdir "$test_tmpdir/isolated"; for tool in git sed sort mktemp rm grep; do ln -s "$(command -v "$tool")" "$test_tmpdir/isolated/$tool"; done
+ln -s "$test_tmpdir/bin/gh" "$test_tmpdir/isolated/gh"
+PATH="$test_tmpdir/isolated" /bin/bash "$hook"' 'missing gitchangelog fails rather than publishing placeholder notes'
+is errlvl 1
+is err part 'gitchangelog'
+try 'mkdir "$test_tmpdir/isolated-gh"; for tool in git sed sort; do ln -s "$(command -v "$tool")" "$test_tmpdir/isolated-gh/$tool"; done
+PATH="$test_tmpdir/isolated-gh" /bin/bash "$hook"' 'missing gh fails fast'
+is errlvl 1
+is err part 'gh'
+try 'VIEW_FAIL=yes "$hook"' 'gh view operational failure is fatal'
+is errlvl 1
+is err part 'gh release view'
+try 'CREATE_FAIL=yes "$hook"' 'gh create failure is fatal'
+is errlvl 1
+is err part 'gh release create'
