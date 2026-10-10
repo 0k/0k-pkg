@@ -322,6 +322,7 @@ merge
 migrate
 minimise
 minimize
+mint
 mock
 modernize
 modify
