@@ -4,7 +4,11 @@
 ## GitHub releases use fake remote commands; git repositories stay in sunit's sandbox.
 exname=$(basename "$0")
 export exname prefix_cmd
+## The real binary, not a PATH shim: a shim re-resolving "next git" with
+## the stub first in PATH would loop back into the stub.
 prefix_cmd='
+REAL_GIT="$(git --exec-path)/git"
+export REAL_GIT
 cd "$test_tmpdir/proj"
 export PATH="$test_tmpdir/bin:$PATH" LOG="$test_tmpdir/log" TMPDIR="$test_tmpdir/tmp"
 export pkg_name=fx
@@ -13,6 +17,7 @@ hook="$base/src/etc/pkgcmd.d/all/release/post-publish.d/github-release"
 
 setup() {
     rm -rf "${test_tmpdir:?}/proj" "${test_tmpdir:?}/bin" "$test_tmpdir/tmp" "$test_tmpdir/log"
+    rm -f "$test_tmpdir/log.remote" "$test_tmpdir/log.notes"
     mkdir -p "$test_tmpdir/proj" "$test_tmpdir/bin" "$test_tmpdir/tmp"
     (
         cd "$test_tmpdir/proj" || exit 1
@@ -51,11 +56,32 @@ printf '\n' >> "$LOG"
 printf '# Changelog\n\n## 1.2.0\n\nRelease notes.\n'
 EOF
     chmod +x "$test_tmpdir/bin/gh" "$test_tmpdir/bin/gitchangelog"
+    cat > "$test_tmpdir/bin/git" <<'EOF'
+#!/bin/bash
+if [ "$1" = ls-remote ]; then
+    printf '%s\n' "$*" >> "$LOG.remote"
+    [ "${REMOTE_FAIL:-}" != yes ] || exit 7
+    case "${REMOTE_TAG:-}" in
+        missing) exit 0 ;;
+        mismatch) printf '%040d\trefs/tags/1.2.0\n' 1; exit 0 ;;
+    esac
+    sha=$("$REAL_GIT" rev-parse HEAD) || exit 1
+    if [ "${ANNOTATED:-}" = yes ]; then
+        printf '%040d\trefs/tags/1.2.0\n' 2
+        printf '%s\trefs/tags/1.2.0^{}\n' "$sha"
+    else
+        printf '%s\trefs/tags/1.2.0\n' "$sha"
+    fi
+    exit 0
+fi
+exec "$REAL_GIT" "$@"
+EOF
+    chmod +x "$test_tmpdir/bin/git"
 }
 
 try '"$hook" && cat "$LOG" && cat "$LOG.notes"' 'creates release with exact notes and explicit repo/title'
 is errlvl 0
-is out part 'gh <release> <create> <1.2.0> <--repo> <owner/fx> <--title> <1.2.0> <--notes>'
+is out part 'gh <release> <create> <1.2.0> <--verify-tag> <--repo> <owner/fx> <--title> <1.2.0> <--notes>'
 is out part 'https://github.com/owner/fx/releases/tag/1.2.0'
 is out part '## 1.2.0'
 try '"$hook" >/dev/null && diff "$LOG.notes" <(printf "\n## 1.2.0\n\nRelease notes.\n")' 'drops only the changelog title'
@@ -113,12 +139,12 @@ is err part 'gitchangelog'
 try 'CHANGELOG_EMPTY=yes "$hook"; rc=$?; grep -q "<create>" "$LOG" && exit 99; exit "$rc"' 'empty notes fail before creating a release'
 is errlvl 1
 is err part 'empty release notes'
-try 'mkdir "$test_tmpdir/isolated"; for tool in git sed sort mktemp rm grep; do ln -s "$(command -v "$tool")" "$test_tmpdir/isolated/$tool"; done
+try 'mkdir "$test_tmpdir/isolated"; for tool in git sed sort mktemp rm grep dirname readlink; do ln -s "$(command -v "$tool")" "$test_tmpdir/isolated/$tool"; done
 ln -s "$test_tmpdir/bin/gh" "$test_tmpdir/isolated/gh"
 PATH="$test_tmpdir/isolated" /bin/bash "$hook"' 'missing gitchangelog fails rather than publishing placeholder notes'
 is errlvl 1
 is err part 'gitchangelog'
-try 'mkdir "$test_tmpdir/isolated-gh"; for tool in git sed sort; do ln -s "$(command -v "$tool")" "$test_tmpdir/isolated-gh/$tool"; done
+try 'mkdir "$test_tmpdir/isolated-gh"; for tool in git sed sort dirname readlink; do ln -s "$(command -v "$tool")" "$test_tmpdir/isolated-gh/$tool"; done
 PATH="$test_tmpdir/isolated-gh" /bin/bash "$hook"' 'missing gh fails fast'
 is errlvl 1
 is err part 'gh'
@@ -128,3 +154,18 @@ is err part 'gh release view'
 try 'CREATE_FAIL=yes "$hook"' 'gh create failure is fatal'
 is errlvl 1
 is err part 'gh release create'
+
+try 'REMOTE_TAG=missing "$hook"; rc=$?; ! grep -q "<create>" "$LOG" || exit 99; exit "$rc"' 'missing remote tag cannot create a release'
+is errlvl 1
+is err part 'tag 1.2.0 is not pushed to owner/fx; push it first'
+try 'REMOTE_TAG=mismatch "$hook"; rc=$?; ! grep -q "<create>" "$LOG" || exit 99; exit "$rc"' 'remote tag mismatch reports both commits'
+is errlvl 1
+is err part '0000000000000000000000000000000000000001'
+is err reg '[0-9a-f]{40}.*[0-9a-f]{40}'
+try 'git tag -d 1.2.0 >/dev/null; git -c user.name=Tester -c user.email=t@example.com tag -a 1.2.0 -m release
+ANNOTATED=yes "$hook" >/dev/null && cat "$LOG.remote"' 'annotated remote tag is peeled before comparing commits'
+is errlvl 0
+is out part 'ls-remote --tags git@github.com:owner/fx.git refs/tags/1.2.0 refs/tags/1.2.0^{}'
+try 'REMOTE_FAIL=yes "$hook"; rc=$?; ! grep -q "<create>" "$LOG" || exit 99; exit "$rc"' 'remote lookup failure is fatal before creation'
+is errlvl 1
+is err part 'Cannot read remote tag'

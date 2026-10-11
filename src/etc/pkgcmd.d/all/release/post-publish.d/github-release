@@ -12,14 +12,15 @@ export LC_ALL=C
 die() { echo "Error: $*" >&2; exit 1; }
 info() { echo "$*" >&2; }
 
+## Same origin/tag rules as the pre-publish guard; no independent copy here.
+# shellcheck source=src/bin/pkg-release-remote
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../../../bin/pkg-release-remote" || die 'Cannot load release remote checks.'
+
 VERSION=$(git describe --tags --exact-match HEAD 2>/dev/null) || {
     info 'HEAD is not on a tag, skipping GitHub release'
     exit 0
 }
-origin=$(git remote get-url origin) || die 'Cannot read origin; configure a GitHub origin remote.'
-if [ -d "$origin" ]; then
-    origin=$(git -C "$origin" remote get-url origin) || die 'Cannot read the source repository origin.'
-fi
+origin=$(pkg._release_origin) || die 'Cannot read origin; configure a GitHub origin remote.'
 case "$origin" in
     git@github.com:*) repo=${origin#git@github.com:} ;;
     ssh://git@github.com/*) repo=${origin#ssh://git@github.com/} ;;
@@ -45,6 +46,7 @@ else
         die "gh release view failed for $repo/$VERSION; check authentication and connectivity."
     fi
 fi
+pkg._release_tag_check "$origin" "$VERSION" "$repo" || exit 1
 command -v gitchangelog >/dev/null || die 'gitchangelog is required; install it and configure markdown output in .gitchangelog.rc.'
 
 git tag -l | sort -V > "$tmp/tags" || die 'Cannot enumerate release tags.'
@@ -77,5 +79,5 @@ find "$tmp/assets" -type f -print0 | sort -z > "$tmp/assets-list" || die 'Cannot
 while IFS= read -r -d '' file; do
     assets+=("$file")
 done < "$tmp/assets-list"
-gh release create "$VERSION" --repo "$repo" --title "$VERSION" --notes "$NOTES" "${assets[@]}" ||
+gh release create "$VERSION" --verify-tag --repo "$repo" --title "$VERSION" --notes "$NOTES" "${assets[@]}" ||
     die "gh release create failed for $repo/$VERSION."
