@@ -8,8 +8,6 @@
 ## - upgrade: with external loop to check publishing ? or localy with 'dpkg -i' ?
 ## - we could add a check after publish that it appears in the deb index.
 ## - in the line of the process release checks, it should probably check also that
-##   the commit was pushed before actually releasing anything.
-## - in the line of the process release checks, it should probably check also that
 ##   the tests passes.
 
 
@@ -73,6 +71,10 @@ Others:
     -C|--continue-on-error
     -s|--shell
     --publish
+
+    Publishing requires the release tag and commit on origin. Set
+    PKG_ALLOW_UNPUSHED=1 to explicitly bypass the pre-publish push check.
+    pkg never pushes or fetches; push the tag and release branch yourself.
 
 
 "

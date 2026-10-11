@@ -1,0 +1,94 @@
+# -*- mode: shell-script -*-
+# shellcheck disable=SC2016
+## E: real local history, stubbed ls-remote; publisher marker proves rejection ordering.
+exname=$(basename "$0")
+export exname prefix_cmd
+## The real binary, not a PATH shim: a shim re-resolving "next git" with
+## the stub first in PATH would loop back into the stub.
+prefix_cmd='
+REAL_GIT="$(git --exec-path)/git"
+export REAL_GIT
+cd "$test_tmpdir/proj"
+export PATH="$test_tmpdir/bin:$PATH" LOG="$test_tmpdir/log"
+export PKGCMD_CONFIG_PATH="$test_tmpdir/plugins" PKGCMD_ALTERNATIVES=alpha
+. "$base/src/bin/pkgcmd"
+'
+setup() {
+    rm -rf "${test_tmpdir:?}/proj" "${test_tmpdir:?}/bin" "${test_tmpdir:?}/plugins" "${test_tmpdir:?}/log" "${test_tmpdir:?}/clone"
+    rm -f "$test_tmpdir/log.remote"
+    mkdir -p "$test_tmpdir/proj" "$test_tmpdir/bin" "$test_tmpdir/plugins/alpha/release/publish"
+    (
+        cd "$test_tmpdir/proj" || exit 1
+        git -c init.defaultBranch=main init -q
+        git -c core.hooksPath=/dev/null -c user.name=Tester -c user.email=t@example.com commit -q --allow-empty -m first
+        git -c core.hooksPath=/dev/null -c user.name=Tester -c user.email=t@example.com commit -q --allow-empty -m release
+        git tag 1.2.0
+        git remote add origin https://example.invalid/owner/fx.git
+    )
+    printf '#!/bin/bash\necho published >> "$LOG"\n' > "$test_tmpdir/plugins/alpha/release/publish/fake"
+    cat > "$test_tmpdir/bin/git" <<'EOF'
+#!/bin/bash
+if [ "$1" = ls-remote ]; then
+    printf '%s\n' "$*" >> "$LOG.remote"
+    [ "${REMOTE_FAIL:-}" != yes ] || exit 7
+    case "$2" in
+        --tags)
+            case "${REMOTE_TAG:-}" in
+                missing) exit 0 ;;
+                mismatch) printf '%040d\trefs/tags/1.2.0\n' 1; exit 0 ;;
+            esac
+            printf '%s\trefs/tags/1.2.0\n' "$("$REAL_GIT" rev-parse 'refs/tags/1.2.0^{commit}')" ;;
+        --heads)
+            case "${REMOTE_HEAD:-}" in
+                empty) exit 0 ;;
+                old) sha=$("$REAL_GIT" rev-parse HEAD^) ;;
+                unknown) sha=0000000000000000000000000000000000000001 ;;
+                *) sha=${REMOTE_HEAD_SHA:-$("$REAL_GIT" rev-parse HEAD)} ;;
+            esac
+            printf '%s\trefs/heads/main\n' "$sha" ;;
+        *) exit 99 ;;
+    esac
+    exit 0
+fi
+exec "$REAL_GIT" "$@"
+EOF
+    chmod +x "$test_tmpdir/bin/git" "$test_tmpdir/plugins/alpha/release/publish/fake"
+}
+
+try 'REMOTE_TAG=missing pkg._publish; rc=$?; [ ! -f "$LOG" ] || exit 99; exit "$rc"' 'unpublished tag fails before publisher runs'
+is errlvl 1
+is err part 'git push'
+is err part 'refs/tags/1.2.0'
+try 'REMOTE_TAG=mismatch pkg._publish; rc=$?; [ ! -f "$LOG" ] || exit 99; exit "$rc"' 'wrong remote tag commit fails before publisher runs'
+is errlvl 1
+is err reg '[0-9a-f]{40}.*[0-9a-f]{40}'
+try 'REMOTE_HEAD=old pkg._publish; rc=$?; [ ! -f "$LOG" ] || exit 99; exit "$rc"' 'tagged commit absent from known branches requires a branch push'
+is errlvl 1
+is err part 'HEAD:refs/heads/<release-branch>'
+try 'pkg._publish && cat "$LOG"' 'pushed tag and branch allow publishing'
+is errlvl 0
+is out 'published' TRIM
+try 'export REMOTE_HEAD_SHA=$(printf "descendant\n" | git -c user.name=Tester -c user.email=t@example.com commit-tree "HEAD^{tree}" -p HEAD)
+pkg._publish && cat "$LOG"' 'release commit reachable from a known newer remote head permits publishing'
+is errlvl 0
+is out 'published' TRIM
+try 'REMOTE_HEAD=unknown pkg._publish && cat "$LOG"' 'unknown remote branch object requires only the verified tag'
+is errlvl 0
+is out 'published' TRIM
+try 'REMOTE_HEAD=empty pkg._publish; rc=$?; [ ! -f "$LOG" ] || exit 99; exit "$rc"' 'no remote branch requires a branch push'
+is errlvl 1
+is err part 'HEAD:refs/heads/<release-branch>'
+try 'PKG_ALLOW_UNPUSHED=1 REMOTE_TAG=missing pkg._publish && cat "$LOG"; [ ! -f "$LOG.remote" ]' 'explicit bypass allows an unpushed release without remote lookup'
+is errlvl 0
+is out 'published' TRIM
+try 'PKG_ALLOW_UNPUSHED=yes REMOTE_TAG=missing pkg._publish; rc=$?; [ ! -f "$LOG" ] || exit 99; exit "$rc"' 'only bypass value one is accepted'
+is errlvl 1
+try 'git clone -q --template= -c core.hooksPath=/dev/null . "$test_tmpdir/clone" && cd "$test_tmpdir/clone" && pkg._publish && cat "$LOG.remote"' 'publish check follows the real origin through one clone hop'
+is errlvl 0
+is out part 'ls-remote --tags https://example.invalid/owner/fx.git'
+try 'REMOTE_FAIL=yes pkg._publish; rc=$?; [ ! -f "$LOG" ] || exit 99; exit "$rc"' 'remote lookup errors fail closed'
+is errlvl 1
+is err part 'Cannot read remote tag'
+try 'git remote remove origin; pkg._publish && cat "$LOG"' 'local repository with no origin still supports local publishing'
+is errlvl 0
+is out 'published' TRIM

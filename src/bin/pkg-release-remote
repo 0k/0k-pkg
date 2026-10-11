@@ -1,0 +1,77 @@
+#!/bin/bash
+## Shared read-only release checks for pkgcmd and the standalone GitHub hook.
+## Resolve one local-clone hop, as pkg-common builds in a clone of the project.
+pkg._release_origin() {
+    local release_origin
+    release_origin=$(git remote get-url origin) || return 1
+    if [ -d "$release_origin" ]; then
+        release_origin=$(git -C "$release_origin" remote get-url origin) || return 1
+    fi
+    printf '%s\n' "$release_origin"
+}
+
+## Compare commits, not tag objects: annotated tags need the peeled remote ref.
+## No fetch, push or local ref updates. The optional label is for diagnostics.
+pkg._release_tag_check() {
+    local origin="$1" version="$2" label="${3:-$1}"
+    local local_sha remote_tags sha ref remote_sha='' peeled_sha=''
+    local_sha=$(git rev-parse --verify "refs/tags/$version^{commit}") || return 1
+    remote_tags=$(git ls-remote --tags "$origin" "refs/tags/$version" "refs/tags/$version^{}") || {
+        printf 'Error: Cannot read remote tag %s from %s; check connectivity before publishing.\n' "$version" "$label" >&2
+        return 1
+    }
+    while read -r sha ref; do
+        case "$ref" in
+            "refs/tags/$version") remote_sha=$sha ;;
+            "refs/tags/$version^{}") peeled_sha=$sha ;;
+        esac
+    done <<< "$remote_tags"
+    if [ -z "$remote_sha" ]; then
+        printf 'Error: tag %s is not pushed to %s; push it first\n' "$version" "$label" >&2
+        printf '  git push %q %q\n' "$origin" "refs/tags/$version" >&2
+        return 1
+    fi
+    remote_sha=${peeled_sha:-$remote_sha}
+    if [ "$remote_sha" != "$local_sha" ]; then
+        printf 'Error: tag %s differs on %s: local %s, remote %s.\n' "$version" "$label" "$local_sha" "$remote_sha" >&2
+        printf 'Reconcile the remote tag before publishing; the local release tag would be pushed with:\n  git push %q %q\n' "$origin" "refs/tags/$version" >&2
+        return 1
+    fi
+}
+
+## PKG_ALLOW_UNPUSHED=1 explicitly bypasses this pre-publish guard only.
+## Off-tag/local-only projects retain their existing publishing behavior.
+pkg._release_push_check() {
+    [ "${PKG_ALLOW_UNPUSHED:-}" != 1 ] || return 0
+    local version origin remotes local_sha heads sha ref unknown=
+    version=$(git describe --tags --exact-match HEAD 2>/dev/null) || return 0
+    remotes=$(git remote) || return 1
+    [[ $'\n'"$remotes"$'\n' == *$'\norigin\n'* ]] || return 0
+    origin=$(pkg._release_origin) || {
+        printf 'Error: Cannot resolve origin before publishing.\n' >&2
+        return 1
+    }
+    [ ! -d "$origin" ] || return 0
+    pkg._release_tag_check "$origin" "$version" || return 1
+    local_sha=$(git rev-parse HEAD) || return 1
+    heads=$(git ls-remote --heads "$origin") || {
+        printf 'Error: Cannot read remote branches from %s before publishing.\n' "$origin" >&2
+        return 1
+    }
+    while read -r sha ref; do
+        [ -n "$ref" ] || continue
+        [ "$sha" != "$local_sha" ] || return 0
+        if git cat-file -e "$sha^{commit}" 2>/dev/null; then
+            if git merge-base --is-ancestor "$local_sha" "$sha"; then
+                return 0
+            fi
+        else
+            ## Without fetching, unknown remote objects cannot disprove reachability.
+            unknown=1
+        fi
+    done <<< "$heads"
+    [ -z "$unknown" ] || return 0
+    printf 'Error: release commit %s is not reachable from a branch on %s; push the release branch first:\n' "$local_sha" "$origin" >&2
+    printf '  git push %q HEAD:refs/heads/<release-branch>\n' "$origin" >&2
+    return 1
+}

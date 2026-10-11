@@ -14,6 +14,11 @@ include common
 include fn
 include parse
 
+## Resolve our installation through the pkgcmd symlink, not CONFIG_PATH (which
+## callers may override with a private plugin tree).
+# shellcheck source=src/bin/pkg-release-remote
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/pkg-release-remote" || return 1
+
 
 pkg.load() {
     local script path="$PWD" loaded
@@ -123,6 +128,7 @@ pkg._list_plugin_files() {
 pkg._publish() (
     set -o pipefail
     export LC_ALL=C
+    pkg._release_push_check || return 1
     local lists script _plugin has_run=
     lists=$(mktemp -d) || return 1
     trap 'rm -rf "$lists"' EXIT
