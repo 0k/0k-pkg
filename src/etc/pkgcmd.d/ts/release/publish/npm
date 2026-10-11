@@ -1,10 +1,13 @@
 #!/bin/bash
 
-## Staged publishing (https://docs.npmjs.com/staged-publishing):
+## Staged publishing (https://docs.npmjs.com/staged-publishing/):
 ## stage the artifact, show what was staged, then approve (2FA).
-## Requires npm >= 11.15 and an already-existing package on the
-## registry (brand-new packages cannot be staged: first-publish them
-## manually with ``npm publish``).
+## Requires npm >= 11.15. Since 2026-10-02 new packages can also be
+## staged: npm publishes a public 0.0.0-stage placeholder, then the
+## real version only after approval (see the documentation above).
+
+die() { echo "Error: $*" >&2; exit 1; }
+info() { echo "$*" >&2; }
 
 if ! npm stage --help >/dev/null 2>&1; then
     echo "Error: 'npm stage' unavailable (needs npm >= 11.15)." \
@@ -12,6 +15,32 @@ if ! npm stage --help >/dev/null 2>&1; then
     exit 1
 fi
 
+## npm only starts its 2FA web flow when stdin AND stdout are TTYs:
+## otherwise it fails with EOTP and redacts the URL. So the approval
+## always runs under a PTY, even when pkg runs unattended (an agent, a
+## background job). With --browser=false npm prints the URL and polls
+## at once instead of waiting for ENTER. We print every URL npm gives
+## as "Open this URL to approve: <url>".
+command -v script >/dev/null || die "'script' is required for npm approval."
+
+approve() {
+    local command line url rc
+    printf -v command 'npm stage approve %q --browser=false' "$1"
+    script -qfec "$command" /dev/null |
+        while IFS= read -r line; do
+            line=${line%$'\r'}
+            printf '%s\n' "$line" >&2
+            ## A real id, never the "***" npm prints when it redacts.
+            [[ "$line" =~ (https://www\.npmjs\.com/auth/cli/[0-9A-Za-z-]+) ]] || continue
+            url=${BASH_REMATCH[1]}
+            info "Open this URL to approve: $url"
+        done
+    rc=${PIPESTATUS[0]}
+    return "$rc"
+}
+
+## ``artifacts`` is exported by pkg-common's release pipeline.
+# shellcheck disable=SC2154
 for pack in "$artifacts/build/"* ; do
     ## npm refuses to default prerelease versions (e.g. 1.0.0-rc.3)
     ## to the 'latest' dist-tag: it requires an explicit --tag. We
@@ -27,11 +56,9 @@ for pack in "$artifacts/build/"* ; do
     esac
     out=$(npm stage publish --access public "${tag_opts[@]}" "$pack") || {
         echo "Error: staging failed for '$pack'." >&2
-        echo "Note: brand-new packages cannot be staged; a first" \
-             "manual 'npm publish' is required." >&2
         exit 1
     }
-    echo "$out"
+    info "$out"
     stage_id=$(printf '%s\n' "$out" |
                    sed -n 's/^.*staged with id \([0-9a-f-]\{36\}\).*$/\1/p')
     if [ -z "$stage_id" ]; then
@@ -40,26 +67,29 @@ for pack in "$artifacts/build/"* ; do
              "inspect with 'npm stage list'." >&2
         exit 1
     fi
-    npm stage view "$stage_id" || exit 1
-    cat <<EOF
+    npm stage view "$stage_id" >&2 || exit 1
+    cat >&2 <<EOF
 ──────────────────────────────────────────────────────────
 2FA approval required to publish (stage id: $stage_id)
 
-npm will now print an authentication link and open your
-browser: this is npm staged publishing deferring 2FA to
-this explicit approval step.
+The web approval URL expires after about 5 minutes.
+Open the "Open this URL to approve:" link below to finish 2FA.
+If approval fails, pkg retries once to request a new URL.
 
 Before authenticating, VERIFY the URL domain is:
 
     https://www.npmjs.com/
 ──────────────────────────────────────────────────────────
 EOF
-    npm stage approve "$stage_id" || {
+    if ! approve "$stage_id"; then
+        info 'Approval failed or expired; retrying once with a new approval URL (about 5 minutes).'
+        approve "$stage_id" || {
         echo "Error: approval failed or was refused. Package remains" \
              "staged; approve later with:" >&2
         echo "  npm stage approve $stage_id" >&2
         echo "or discard with:" >&2
         echo "  npm stage reject $stage_id" >&2
         exit 1
-    }
+        }
+    fi
 done

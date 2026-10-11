@@ -1,0 +1,60 @@
+# -*- mode: shell-script -*-
+# shellcheck disable=SC2016
+## A: fake npm behaves like npm 11: the web 2FA flow (URL printed) only
+## happens with a TTY; without one it fails with a masked EOTP.
+exname=$(basename "$0")
+export exname prefix_cmd
+prefix_cmd='
+export HOME="$test_tmpdir/home" PATH="$test_tmpdir/bin:$PATH"
+export LOG="$test_tmpdir/log" TMPDIR="$test_tmpdir/tmp" artifacts="$test_tmpdir/artifacts"
+publisher="$base/src/etc/pkgcmd.d/ts/release/publish/npm"
+'
+setup() {
+    rm -rf "${test_tmpdir:?}/home" "${test_tmpdir:?}/bin" "${test_tmpdir:?}/tmp" "${test_tmpdir:?}/artifacts"
+    rm -f "$test_tmpdir/log" "$test_tmpdir/log.out" "$test_tmpdir/log.count"
+    mkdir -p "$test_tmpdir/home" "$test_tmpdir/bin" "$test_tmpdir/tmp" "$test_tmpdir/artifacts/build" "$test_tmpdir/package"
+    printf '{"name":"new-package","version":"1.0.0-rc.3"}\n' > "$test_tmpdir/package/package.json"
+    tar czf "$test_tmpdir/artifacts/build/package.tgz" -C "$test_tmpdir" package
+    cat > "$test_tmpdir/bin/npm" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "$LOG"
+case "$*" in
+    'stage --help') exit 0 ;;
+    'stage publish '*)
+        [ "${STAGE_FAIL:-}" != yes ] || exit 1
+        echo 'new-package@1.0.0-rc.3 staged with id 12345678-1234-1234-1234-123456789abc' ;;
+    'stage view '*) exit 0 ;;
+    'stage approve '*)
+        n=0; [ ! -f "$LOG.count" ] || read -r n < "$LOG.count"
+        n=$((n + 1)); echo "$n" > "$LOG.count"
+        if ! [ -t 0 ] || ! [ -t 1 ]; then
+            echo 'npm error code EOTP'
+            echo 'npm error   https://www.npmjs.com/auth/cli/***'
+            exit 1
+        fi
+        printf 'Authenticate your account at:\nhttps://www.npmjs.com/auth/cli/fake-%s\n' "$n"
+        case "${APPROVE_FAIL:-}" in always) exit 1 ;; once) [ "$n" -gt 1 ] || exit 1 ;; esac ;;
+    *) echo "unexpected npm command: $*" >&2; exit 99 ;;
+esac
+EOF
+    chmod +x "$test_tmpdir/bin/"*
+}
+
+try 'bash "$publisher" > "$LOG.out" 2>&1; rc=$?; cat "$LOG.out"; [ -z "$(ls -A "$TMPDIR")" ] || exit 99; exit "$rc"' 'the approval URL is printed from a real PTY'
+is errlvl 0
+is out part 'Open this URL to approve: https://www.npmjs.com/auth/cli/fake-1'
+is out part '5 minutes'
+try 'bash "$publisher" >/dev/null 2>&1 && cat "$LOG"' 'new package stages views then approves with prerelease dist tag'
+is errlvl 0
+is out reg 'stage --help.*stage publish --access public --tag latest .*stage view 12345678-1234-1234-1234-123456789abc.*stage approve 12345678-1234-1234-1234-123456789abc --browser=false'
+try 'APPROVE_FAIL=once bash "$publisher" > "$LOG.out" 2>&1; rc=$?; cat "$LOG.out"; cat "$LOG.count"; [ -z "$(ls -A "$TMPDIR")" ] || exit 99; exit "$rc"' 'one failed approval retries once with a fresh URL'
+is errlvl 0
+is out part 'Open this URL to approve: https://www.npmjs.com/auth/cli/fake-2'
+is out linereg '^2$'
+try 'APPROVE_FAIL=always bash "$publisher" > "$LOG.out" 2>&1; rc=$?; cat "$LOG.out"; cat "$LOG.count"; [ -z "$(ls -A "$TMPDIR")" ] || exit 99; exit "$rc"' 'two failed approvals report the stage and manual command then clean helper'
+is errlvl 1
+is out part 'npm stage approve 12345678-1234-1234-1234-123456789abc'
+is out linereg '^2$'
+try 'STAGE_FAIL=yes bash "$publisher" > "$LOG.out" 2>&1; rc=$?; cat "$LOG.out"; ! grep -q "first.*publish\|cannot be staged" "$LOG.out" || exit 99; [ -z "$(ls -A "$TMPDIR")" ] || exit 99; exit "$rc"' 'staging failure has no obsolete first-publish advice'
+is errlvl 1
+is out part 'staging failed'
