@@ -7,7 +7,7 @@
 ~0k-pkg~ is a shell-based package management and release automation
 toolkit. It provides a unified interface for building, testing, and
 publishing packages across multiple ecosystems (Rust/Cargo,
-Python/Hatch, TypeScript, JavaScript/npm, and shell packages).
+Python/Hatch, TypeScript/npm, and shell packages).
 
 The toolkit auto-detects the package type from project files and
 routes commands to the appropriate handler, enabling consistent
@@ -34,7 +34,6 @@ workflows regardless of the underlying technology.
 | cargo      | ~Cargo.toml~         | crate → crates.io      | docs.rs check; clippy/fmt/doc/org lint; ~20-org-to-md.sh~ |
 | hatch      | ~pyproject.toml~ with ~hatchling~ + ~hatch-vcs~ | wheel, sdist → PyPI | pdb/rst checks; ~25-changelog.sh~ |
 | python     | ~setup.py~           | wheel, sdist → PyPI    | pdb/rst checks; flake8 lint; ~25-changelog.sh~ |
-| npm        | ~package.json~       | npm pack → npm         | transpile check                          |
 | ts         | ~tsconfig.json~      | npm pack → npm         | transpile check; ~20-org-to-md.sh~       |
 | kal-sh     | ~pkg/~ + ~test/test~ | deb                    | -                                        |
 | charm      | ~metadata.yml~       | -                      | -                                        |
@@ -61,7 +60,7 @@ pandoc --version
 
 # Per-language dependencies
 cargo install toml-cli   # For Cargo/Hatch packages
-apt install jq           # For npm/Hatch packages
+apt install jq           # For TypeScript/Hatch packages
 #+end_src
 
 Install ~0k-pkg~ itself.  Nothing is copied: the clone is the

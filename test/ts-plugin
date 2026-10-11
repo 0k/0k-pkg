@@ -1,0 +1,29 @@
+# -*- mode: shell-script -*-
+## sunit evaluates quoted commands later and provides test_tmpdir.
+# shellcheck disable=SC2016,SC2154
+## B: TS projects resolve to ts only, with package identity from ts/.
+exname=$(basename "$0")
+export exname prefix_cmd
+prefix_cmd='
+cd "$test_tmpdir/proj"
+export PKGCMD_CONFIG_PATH="$base/src/etc/pkgcmd.d"
+. "$base/src/bin/pkgcmd"
+pkg.load
+'
+setup() {
+    mkdir -p "$test_tmpdir/proj"
+    printf '{}\n' > "$test_tmpdir/proj/tsconfig.json"
+    printf '{"name":"@example/fixture","version":"1.2.3"}\n' > "$test_tmpdir/proj/package.json"
+}
+try 'pkg._list_pkg_alternatives' 'TS project lists ts and no dead js alternative'
+is errlvl 0
+is out 'all
+ts' TRIM
+try '[ ! -d "$base/src/etc/pkgcmd.d/npm" ]' 'dead npm plugin directory is removed'
+is errlvl 0
+try 'pkg.cmd_alternative_run pkg-name ts' 'TS plugin provides package name without legacy js'
+is errlvl 0
+is out '@example/fixture' TRIM
+try 'pkg.cmd_alternative_run pkg-version ts' 'TS plugin provides package version without legacy js'
+is errlvl 0
+is out '1.2.3' TRIM

@@ -1,6 +1,0 @@
-#!/bin/bash
-
-
-for pack in "$artifacts/build/"* ; do
-    echo npm publish --access public "$pack"
-done

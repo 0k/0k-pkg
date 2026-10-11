@@ -11,6 +11,15 @@ pkgcmd:ts:applies() {
     [ -e tsconfig.json ]
 }
 
+## Package identity belongs to ts, not the removed legacy js alternative.
+pkgcmd:pkg-name:ts:run() {
+    jq -r .name package.json
+}
+
+pkgcmd:pkg-version:ts:run() {
+    jq -r .version package.json
+}
+
 
 ## ``t`` command -- runs all tests, fails at first failure by default
 pkgcmd:t:ts:run() {
@@ -21,4 +30,3 @@ pkgcmd:t:ts:run() {
 ## ``pkg`` and ``lint`` are provided by the ``all`` package type
 ## (``pkg-common`` and the ``lint/`` hook scripts); the ts-specific
 ## parts live in ``release/`` and ``dist/check/`` here.
-
