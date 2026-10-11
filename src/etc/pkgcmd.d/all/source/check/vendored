@@ -10,7 +10,8 @@
 ##   - listed file missing                 -> error
 ##   - listed file modified, no override   -> error
 ##   - project file shadowing a plugin one -> error
-##   - file older than current plugin copy -> warning (run ``pkg vendor``)
+##   - file older than current plugin copy -> warning, or error with
+##                                            AUTOGEN_STRICT=1 (run ``pkg vendor``)
 ##
 
 Wrap -v -s -d "Vendored autogen scripts in sync" <<'EOF2' || exit 1
@@ -56,7 +57,12 @@ while read -r rel sha plugin; do
         continue
     fi
     if [ "${current[$rel]}" ] && [ "${current[$rel]}" != "$sha" ]; then
-        echo "warning: '$rel' is older than the copy 0k-pkg now provides." >&2
+        if [ "${AUTOGEN_STRICT:-}" = 1 ]; then
+            echo "error: '$rel' is older than the copy 0k-pkg now provides." >&2
+            error=1
+        else
+            echo "warning: '$rel' is older than the copy 0k-pkg now provides." >&2
+        fi
         outdated=1
         continue
     fi
@@ -76,7 +82,7 @@ for rel in "${!current[@]}"; do
 done
 
 if [ "$outdated" ]; then
-    echo "warning: run 'pkg vendor', re-test, and commit to pick up updates." >&2
+    echo "$( [ "${AUTOGEN_STRICT:-}" = 1 ] && echo error || echo warning ): run 'pkg vendor', re-test, and commit to pick up updates." >&2
 fi
 exit $error
 EOF2

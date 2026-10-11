@@ -303,6 +303,24 @@ is errlvl 0
 is out part "'.package.d/autogen.d/20-org-to-md.sh' is older than the copy 0k-pkg now provides."
 is out part "run 'pkg vendor', re-test, and commit"
 
+try 'export AUTOGEN_STRICT=1
+'"$upstream_check" "older vendored copy fails release strictness"
+is errlvl 1
+is out part "error: '.package.d/autogen.d/20-org-to-md.sh'"
+is out part "run 'pkg vendor'"
+
+try 'export AUTOGEN_STRICT=1
+sed -i "2i ## pkgcmd: local-override" .package.d/autogen.d/20-org-to-md.sh
+'"$upstream_check" "strict outdated local override remains acceptable"
+is errlvl 0
+is out part 'is a declared local override'
+
+try 'export AUTOGEN_STRICT=1 PKGCMD_CONFIG_PATH="$test_tmpdir/up/etc/pkgcmd.d"
+pkg vendor >/dev/null
+'"$vendored_check" "updated copy passes strict check"
+is errlvl 0
+is out part 'is in sync (from cargo)'
+
 try 'export PKGCMD_CONFIG_PATH="$test_tmpdir/up/etc/pkgcmd.d"
 pkg vendor' "vendor updates the outdated file"
 noerror

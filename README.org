@@ -164,7 +164,8 @@ removed on the next ~pkg vendor~ unless modified or overridden.
 At release time ~all/source/check/vendored~ verifies that every
 vendored file matches its manifest entry (error on drift without
 the override marker, error on a project script silently shadowing a
-plugin one), and warns when 0k-pkg now ships a newer copy: run
+plugin one). When 0k-pkg now ships a different copy, it warns in
+developer checks and fails with ~AUTOGEN_STRICT=1~ (the ~pkg~ pipeline): run
 ~pkg vendor~, re-test, commit.
 
 Optional tools used by vendored scripts (~pandoc~, ~gitchangelog~)
