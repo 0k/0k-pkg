@@ -1,0 +1,258 @@
+#!/bin/bash
+## List the projects of the development tree that depend on the library
+## checked out in the current directory, with the requirement each one
+## commits and the state of its local, uncommitted override.
+set -eu
+
+exname=pkg-consumers
+
+die()  { printf 'Error: %s\n' "$*" >&2; exit 2; }
+warn() { printf 'Warning: %s\n' "$*" >&2; }
+
+usage() {
+    cat <<EOF
+Usage: pkg consumers [-C LIBDIR] [--root ROOT] [--check] [-0 | --json]
+
+List every project ROOT/*/* whose manifest depends on the package
+defined in LIBDIR (Cargo.toml, package.json or pyproject.toml), one
+record per dependency entry:
+
+  DIR  ECOSYSTEM  FIELD  REQUIREMENT  OVERRIDE
+
+OVERRIDE tells whether the consumer's working directory builds against
+LIBDIR through an uncommitted local override:
+
+  linked     the override points at LIBDIR
+  foreign    an override points at another directory
+  none       no override: the registry version is used
+  committed  (cargo) the .cargo/config.toml patch is tracked by git
+  manifest   the committed requirement itself is a local path (debt:
+             see 'path:', 'file:', 'link:' requirements)
+  unknown    (python) no .venv to inspect
+
+Overrides looked at: npm 'node_modules/<name>' symlink (npm link),
+cargo '[patch.*]' path in .cargo/config.toml, python editable install
+recorded in .venv (direct_url.json).
+
+Options:
+  -C LIBDIR    library directory (default: current directory)
+  --root ROOT  development tree to scan (default: \$PKG_CONSUMERS_ROOT,
+               else \$HOME/dev)
+  --check      exit 1 when a consumer's override is not 'linked'
+  -0           NUL-terminated fields: dir, ecosystem, package, field,
+               requirement, override
+  --json, -j   one JSON object per record (same fields)
+  -h, --help   show this help
+  --version    show version
+
+Exit codes: 0 success, 1 --check found consumers not linked,
+2 usage or environment error.
+
+Example:
+  cd ~/dev/ts/time-chart && pkg consumers
+  /home/me/dev/ts/rrd-graph	npm	dependencies	^0.1.2	linked
+EOF
+}
+
+libdir=.
+root=${PKG_CONSUMERS_ROOT:-"$HOME/dev"}
+check=
+format=human
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -h|--help) usage; exit 0 ;;
+        --version)
+            git -C "$(dirname "$(readlink -f "$0")")" describe --tags --always 2>/dev/null ||
+                die "cannot determine the 0k-pkg version."
+            exit 0
+            ;;
+        -C) [ "$#" -ge 2 ] || die "-C needs a directory."; libdir=$2; shift ;;
+        --root) [ "$#" -ge 2 ] || die "--root needs a directory."; root=$2; shift ;;
+        --check) check=1 ;;
+        -0) format=nul ;;
+        -j|--json) format=json ;;
+        --) shift; break ;;
+        *) die "unknown argument '$1' (see '$exname --help')." ;;
+    esac
+    shift
+done
+[ "$#" -eq 0 ] || die "unexpected argument '$1' (see '$exname --help')."
+
+for bin in jq toml; do
+    command -v "$bin" >/dev/null || die "'$bin' is required (see 0k-pkg README, Installation)."
+done
+[ -d "$libdir" ] || die "library directory '$libdir' does not exist."
+[ -d "$root" ] || die "development tree '$root' does not exist."
+libdir=$(readlink -f "$libdir")
+root=$(readlink -f "$root")
+
+## ``toml_json FILE``: FILE as JSON, or failure with a warning.
+toml_json() {
+    toml get "$1" . 2>/dev/null || { warn "cannot parse '$1', skipped."; return 1; }
+}
+
+## PEP 503 normalized name.
+py_norm() {
+    local n=${1,,}
+    n=$(printf '%s' "$n" | sed -E 's/[-_.]+/-/g')
+    printf '%s' "$n"
+}
+
+## ``same_dir A B``: both resolve to the same directory.
+same_dir() { [ "$(readlink -f "$1" 2>/dev/null)" = "$2" ]; }
+
+npm_name='' cargo_name='' py_name=''
+if [ -f "$libdir/package.json" ]; then
+    npm_name=$(jq -r '.name // empty' "$libdir/package.json") ||
+        die "cannot parse '$libdir/package.json'."
+fi
+if [ -f "$libdir/Cargo.toml" ]; then
+    cargo_name=$(toml_json "$libdir/Cargo.toml" | jq -r '.package.name // empty') ||
+        die "cannot parse '$libdir/Cargo.toml'."
+fi
+if [ -f "$libdir/pyproject.toml" ]; then
+    py_name=$(toml_json "$libdir/pyproject.toml" | jq -r '.project.name // empty') ||
+        die "cannot parse '$libdir/pyproject.toml'."
+fi
+[ "$npm_name$cargo_name$py_name" ] ||
+    die "no package name found in '$libdir' (Cargo.toml [package], package.json, pyproject.toml [project])."
+
+## Each scanner reads one consumer directory and emits
+## ``field\0requirement\0`` per matching dependency entry.
+
+npm_entries() {
+    jq -j --arg n "$npm_name" '
+        ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"][] as $f
+        | (.[$f] // {}) | select(type == "object") | .[$n] // empty
+        | "\($f)\u0000\(.)\u0000"' "$1/package.json" 2>/dev/null ||
+        warn "cannot parse '$1/package.json', skipped."
+}
+
+npm_override() {
+    local link="$1/node_modules/$npm_name"
+    if [ -L "$link" ]; then
+        if same_dir "$link" "$libdir"; then echo linked; else echo foreign; fi
+    else
+        echo none
+    fi
+}
+
+cargo_entries() {
+    local json
+    json=$(toml_json "$1/Cargo.toml") || return 0
+    jq -j --arg n "$cargo_name" '
+        def kinds: ["dependencies", "dev-dependencies", "build-dependencies"][];
+        ( (kinds as $f | [$f, (.[$f] // {})]),
+          ["workspace.dependencies", (.workspace.dependencies // {})],
+          ((.target // {}) | to_entries[] | .key as $t | .value as $v
+           | kinds as $f | ["target.\($t).\($f)", ($v[$f] // {})]) )
+        | .[0] as $field | .[1] | select(type == "object") | to_entries[]
+        | select((if (.value | type) == "object" then (.value.package // .key) else .key end) == $n)
+        | .value as $v
+        | (if ($v | type) == "string" then $v
+           elif $v.version then $v.version
+           elif $v.path then "path:\($v.path)"
+           elif $v.git then "git:\($v.git)"
+           elif $v.workspace then "workspace"
+           else "" end) as $req
+        | "\($field)\u0000\($req)\u0000"' <<< "$json"
+}
+
+cargo_override() {
+    local cfg rel json path
+    for rel in .cargo/config.toml .cargo/config; do
+        cfg="$1/$rel"
+        [ -f "$cfg" ] && break
+    done
+    [ -f "$cfg" ] || { echo none; return 0; }
+    json=$(toml_json "$cfg") || { echo none; return 0; }
+    path=$(jq -r --arg n "$cargo_name" '
+        [(.patch // {})[] | to_entries[]
+         | select((.value.package // .key) == $n) | .value.path // empty][0] // empty' <<< "$json")
+    if [ -z "$path" ]; then
+        echo none
+    elif git -C "$1" ls-files --error-unmatch "$rel" >/dev/null 2>&1; then
+        echo committed
+    else
+        ## Cargo resolves config paths from the parent of ``.cargo/``.
+        case "$path" in /*) ;; *) path="$1/$path" ;; esac
+        if same_dir "$path" "$libdir"; then echo linked; else echo foreign; fi
+    fi
+}
+
+py_entries() {
+    local json
+    json=$(toml_json "$1/pyproject.toml") || return 0
+    jq -j --arg n "$(py_norm "$py_name")" '
+        def norm: ascii_downcase | gsub("[-_.]+"; "-");
+        ( ["project.dependencies", (.project.dependencies // [])],
+          ((.project["optional-dependencies"] // {}) | to_entries[]
+           | ["project.optional-dependencies.\(.key)", .value]) )
+        | .[0] as $field | .[1] | select(type == "array") | .[]
+        | select(type == "string")
+        | capture("^\\s*(?<name>[A-Za-z0-9][A-Za-z0-9._-]*)(?<req>.*)$") // empty
+        | select((.name | norm) == $n)
+        | "\($field)\u0000\(.req | sub("^\\s+"; ""))\u0000"' <<< "$json"
+}
+
+py_override() {
+    local venv="$1/.venv" info base url want
+    [ -d "$venv" ] || { echo unknown; return 0; }
+    want=$(py_norm "$py_name")
+    for info in "$venv"/lib/python*/site-packages/*.dist-info; do
+        [ -d "$info" ] || continue
+        base=${info##*/}
+        [ "$(py_norm "${base%%-*}")" = "$want" ] || continue
+        url=$(jq -r 'if .dir_info.editable then .url else empty end' \
+                  "$info/direct_url.json" 2>/dev/null) || url=
+        [ "$url" ] || { echo none; return 0; }
+        if same_dir "${url#file://}" "$libdir"; then echo linked; else echo foreign; fi
+        return 0
+    done
+    echo none
+}
+
+## ``scan DIR ECOSYSTEM MANIFEST NAME``: records of DIR for ECOSYSTEM.
+scan() {
+    local dir="$1" eco="$2" manifest="$3" name="$4" field req state override=''
+    [ "$name" ] && [ -f "$dir/$manifest" ] || return 0
+    while IFS= read -r -d '' field && IFS= read -r -d '' req; do
+        case "$req" in
+            path:*|file:*|link:*) state=manifest ;;
+            *) [ "$override" ] || override=$("${eco}_override" "$dir"); state=$override ;;
+        esac
+        printf '%s\0' "$dir" "$eco" "$name" "$field" "$req" "$state"
+    done < <("${eco}_entries" "$dir")
+}
+
+records=$(mktemp) || die "cannot create a temporary file."
+trap 'rm -f -- "$records"' EXIT
+trap 'exit 130' INT TERM
+
+for dir in "$root"/*/*/; do
+    dir=$(readlink -f "$dir")
+    [ "$dir" != "$libdir" ] || continue
+    scan "$dir" npm package.json "$npm_name"
+    scan "$dir" cargo Cargo.toml "$cargo_name"
+    scan "$dir" py pyproject.toml "$py_name"
+done > "$records"
+
+failed=()
+while IFS= read -r -d '' dir && IFS= read -r -d '' eco && IFS= read -r -d '' name &&
+      IFS= read -r -d '' field && IFS= read -r -d '' req && IFS= read -r -d '' override; do
+    [ "$eco" != py ] || eco=python
+    case "$format" in
+        human) printf '%s\t%s\t%s\t%s\t%s\n' "$dir" "$eco" "$field" "$req" "$override" ;;
+        nul)   printf '%s\0' "$dir" "$eco" "$name" "$field" "$req" "$override" ;;
+        json)  jq -cn --arg dir "$dir" --arg ecosystem "$eco" --arg package "$name" \
+                      --arg field "$field" --arg requirement "$req" --arg override "$override" \
+                      '$ARGS.named' ;;
+    esac
+    [ "$override" = linked ] || failed+=("$dir ($eco: $override)")
+done < "$records"
+
+if [ "$check" ] && [ "${#failed[@]}" -gt 0 ]; then
+    printf 'Error: %d consumer(s) do not build against this checkout:\n' "${#failed[@]}" >&2
+    printf '  %s\n' "${failed[@]}" >&2
+    exit 1
+fi

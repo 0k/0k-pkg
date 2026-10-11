@@ -1,0 +1,230 @@
+# -*- mode: shell-script -*-
+# shellcheck shell=bash
+# sunit provides the DSL variables and intentionally evaluates quoted commands.
+# shellcheck disable=SC2016,SC2034,SC2154
+
+## ``pkg consumers``: from a library checkout, list the projects of the
+## development tree (``ROOT/*/*``) that depend on it, with the
+## requirement they commit and the state of their local, uncommitted
+## override (``linked`` when it points at this very checkout).
+##
+## Acceptance ledger:
+##   npm consumer, its range, override linked/none/foreign  -> npm tests
+##   cargo consumer (string, table, renamed, target deps)   -> cargo tests
+##   cargo override via gitignored .cargo/config.toml       -> cargo linked
+##   cargo override committed to git is reported as such   -> cargo committed
+##   committed path/file: requirement reported as debt     -> manifest tests
+##   python consumer, PEP 503 name normalization, editable  -> python tests
+##   only ROOT/*/* scanned, library itself excluded         -> scope test
+##   -0 and --json record formats                           -> format tests
+##   --check fails when a consumer is not linked            -> check tests
+##   no manifest in the library: error, distinct exit code  -> error test
+##   no consumers: no data, success                         -> empty test
+
+prefix_cmd='
+T=$(readlink -f "$test_tmpdir")
+rm -rf "$T/dev"
+## ``proj DIR FILE CONTENT``: write FILE of project DIR under ``$T/dev``.
+proj() { mkdir -p "$(dirname "$T/dev/$1/$2")"; printf "%s\n" "$3" > "$T/dev/$1/$2"; }
+g() { git -c user.name=t -c user.email=t@example.org -c commit.gpgsign=false \
+          -c core.hooksPath=/dev/null "$@"; }
+## ``gitrepo DIR``: make project DIR a git repository ignoring ``.cargo``.
+gitrepo() { mkdir -p "$T/dev/$1"; git -C "$T/dev/$1" init -q --template=; printf ".cargo\n" > "$T/dev/$1/.gitignore"; }
+npm_lib() { proj ts/lib package.json "{\"name\": \"@0k/lib\", \"version\": \"0.1.2\"}"; }
+cargo_lib() { proj rs/lib Cargo.toml "[package]
+name = \"kal-lib\"
+version = \"0.1.0\""; }
+py_lib() { proj py/lib pyproject.toml "[project]
+name = \"Kal_Lib\"
+version = \"0.1.0\""; }
+consumers() { "$base/src/bin/pkg-consumers" --root "$T/dev" "$@"; }
+'
+
+## npm
+
+try 'npm_lib
+proj ts/app package.json "{\"name\": \"app\", \"dependencies\": {\"@0k/lib\": \"^0.1.2\"}}"
+mkdir -p "$T/dev/ts/app/node_modules/@0k"
+ln -s ../../../lib "$T/dev/ts/app/node_modules/@0k/lib"
+cd "$T/dev/ts/lib" && consumers' \
+    "an npm consumer whose node_modules links to the library is linked"
+noerror
+is out "$(readlink -f "$test_tmpdir")/dev/ts/app	npm	dependencies	^0.1.2	linked" RTRIM
+
+try 'npm_lib
+proj ts/app package.json "{\"name\": \"app\", \"devDependencies\": {\"@0k/lib\": \"^0.1.0\"}}"
+mkdir -p "$T/dev/ts/app/node_modules/@0k/lib"
+cd "$T/dev/ts/lib" && consumers' \
+    "an npm consumer with an installed registry copy has no override"
+noerror
+is out "$(readlink -f "$test_tmpdir")/dev/ts/app	npm	devDependencies	^0.1.0	none" RTRIM
+
+try 'npm_lib
+proj ts/app package.json "{\"name\": \"app\", \"dependencies\": {\"@0k/lib\": \"^0.1.2\"}}"
+mkdir -p "$T/dev/ts/app/node_modules/@0k" "$T/elsewhere"
+ln -s "$T/elsewhere" "$T/dev/ts/app/node_modules/@0k/lib"
+cd "$T/dev/ts/lib" && consumers' \
+    "an npm consumer linked to another checkout is foreign"
+noerror
+is out part "	^0.1.2	foreign"
+
+try 'npm_lib
+proj ts/app package.json "{\"name\": \"app\", \"dependencies\": {\"@0k/lib\": \"^0.1.2\"}}"
+cd "$T/dev/ts/lib" && consumers' \
+    "an npm consumer with nothing installed has no override"
+noerror
+is out part "	^0.1.2	none"
+
+## cargo
+
+try 'cargo_lib; gitrepo rs/app
+proj rs/app Cargo.toml "[package]
+name = \"app\"
+version = \"0.1.0\"
+[dependencies]
+kal-lib = { version = \"0.1\", features = [\"x\"] }"
+proj rs/app .cargo/config.toml "[patch.crates-io]
+kal-lib = { path = \"../lib\" }"
+cd "$T/dev/rs/lib" && consumers' \
+    "a cargo consumer patched by a gitignored .cargo/config.toml is linked"
+noerror
+is out "$(readlink -f "$test_tmpdir")/dev/rs/app	cargo	dependencies	0.1	linked" RTRIM
+
+try 'cargo_lib; gitrepo rs/app
+proj rs/app Cargo.toml "[package]
+name = \"app\"
+version = \"0.1.0\"
+[target.\"cfg(unix)\".dev-dependencies]
+lib = { package = \"kal-lib\", version = \"0.1\" }"
+cd "$T/dev/rs/lib" && consumers' \
+    "a renamed cargo dependency under a target table is found, without override"
+noerror
+is out "$(readlink -f "$test_tmpdir")/dev/rs/app	cargo	target.cfg(unix).dev-dependencies	0.1	none" RTRIM
+
+try 'cargo_lib; gitrepo rs/app
+printf "" > "$T/dev/rs/app/.gitignore"
+proj rs/app Cargo.toml "[package]
+name = \"app\"
+version = \"0.1.0\"
+[build-dependencies]
+kal-lib = \"0.1\""
+proj rs/app .cargo/config.toml "[patch.crates-io]
+kal-lib = { path = \"../lib\" }"
+g -C "$T/dev/rs/app" add .cargo/config.toml
+cd "$T/dev/rs/lib" && consumers' \
+    "a cargo override committed to git is reported as committed"
+noerror
+is out part "	build-dependencies	0.1	committed"
+
+try 'cargo_lib; gitrepo rs/app
+proj rs/app Cargo.toml "[package]
+name = \"app\"
+version = \"0.1.0\"
+[dependencies]
+kal-lib = { path = \"../lib\" }"
+cd "$T/dev/rs/lib" && consumers' \
+    "a committed cargo path dependency is reported as a manifest override"
+noerror
+is out part "	dependencies	path:../lib	manifest"
+
+try 'npm_lib
+proj ts/app package.json "{\"name\": \"app\", \"dependencies\": {\"@0k/lib\": \"file:../lib\"}}"
+cd "$T/dev/ts/lib" && consumers' \
+    "a committed npm file: dependency is reported as a manifest override"
+noerror
+is out part "	dependencies	file:../lib	manifest"
+
+## python
+
+try 'py_lib
+proj py/app pyproject.toml "[project]
+name = \"app\"
+dependencies = [\"requests\", \"kal-lib >=0.1 ; python_version>\\\"3.8\\\"\"]"
+cd "$T/dev/py/lib" && consumers' \
+    "a python consumer without .venv is found by normalized name, override unknown"
+noerror
+is out "$(readlink -f "$test_tmpdir")/dev/py/app	python	project.dependencies	>=0.1 ; python_version>\"3.8\"	unknown" RTRIM
+
+try 'py_lib
+proj py/app pyproject.toml "[project]
+name = \"app\"
+dependencies = [\"kal.lib>=0.1\"]"
+proj py/app .venv/lib/python3.12/site-packages/kal_lib-0.1.0.dist-info/direct_url.json \
+    "{\"url\": \"file://$T/dev/py/lib\", \"dir_info\": {\"editable\": true}}"
+cd "$T/dev/py/lib" && consumers' \
+    "a python consumer with an editable install of the library is linked"
+noerror
+is out part "	project.dependencies	>=0.1	linked"
+
+try 'py_lib
+proj py/app pyproject.toml "[project]
+name = \"app\"
+dependencies = [\"kal-lib>=0.1\"]"
+mkdir -p "$T/dev/py/app/.venv/lib/python3.12/site-packages"
+cd "$T/dev/py/lib" && consumers' \
+    "a python consumer whose .venv lacks an editable install has no override"
+noerror
+is out part "	>=0.1	none"
+
+## scope
+
+try 'npm_lib
+proj ts/app/sub package.json "{\"name\": \"deep\", \"dependencies\": {\"@0k/lib\": \"1\"}}"
+proj ts/other package.json "{\"name\": \"other\", \"dependencies\": {\"@0k/libx\": \"1\"}}"
+proj ts/lib2 package.json "{\"name\": \"@0k/lib\", \"dependencies\": {\"@0k/lib\": \"1\"}}"
+mkdir -p "$T/dev/ts/lib/node_modules"
+cd "$T/dev/ts/lib" && consumers' \
+    "only ROOT/*/* projects naming the exact package are consumers, never the library"
+is errlvl 0
+is out "$(readlink -f "$test_tmpdir")/dev/ts/lib2	npm	dependencies	1	none" RTRIM
+
+try 'npm_lib
+cd "$T/dev/ts/lib" && consumers' \
+    "no consumers: no data on stdout, success"
+is errlvl 0
+is out "" RTRIM
+
+## formats
+
+try 'npm_lib
+proj ts/app package.json "{\"name\": \"app\", \"dependencies\": {\"@0k/lib\": \"^0.1.2\"}}"
+cd "$T/dev/ts/lib" && consumers -0 | tr "\0" "|"' \
+    "-0 emits NUL-terminated fields"
+noerror
+is out "$(readlink -f "$test_tmpdir")/dev/ts/app|npm|@0k/lib|dependencies|^0.1.2|none|" RTRIM
+
+try 'npm_lib
+proj ts/app package.json "{\"name\": \"app\", \"dependencies\": {\"@0k/lib\": \"^0.1.2\"}}"
+cd "$T/dev/ts/lib" && consumers --json' \
+    "--json emits one object per consumer"
+noerror
+is out "{\"dir\":\"$(readlink -f "$test_tmpdir")/dev/ts/app\",\"ecosystem\":\"npm\",\"package\":\"@0k/lib\",\"field\":\"dependencies\",\"requirement\":\"^0.1.2\",\"override\":\"none\"}" RTRIM
+
+## --check
+
+try 'npm_lib
+proj ts/app package.json "{\"name\": \"app\", \"dependencies\": {\"@0k/lib\": \"^0.1.2\"}}"
+proj ts/app2 package.json "{\"name\": \"app2\", \"dependencies\": {\"@0k/lib\": \"^0.1.2\"}}"
+mkdir -p "$T/dev/ts/app2/node_modules/@0k"
+ln -s ../../../lib "$T/dev/ts/app2/node_modules/@0k/lib"
+cd "$T/dev/ts/lib" && consumers --check' \
+    "--check fails, naming each consumer whose override is not linked"
+is errlvl 1
+is err "Error: 1 consumer(s) do not build against this checkout:
+  $(readlink -f "$test_tmpdir")/dev/ts/app (npm: none)" RTRIM
+
+try 'npm_lib
+proj ts/app package.json "{\"name\": \"app\", \"dependencies\": {\"@0k/lib\": \"^0.1.2\"}}"
+mkdir -p "$T/dev/ts/app/node_modules/@0k"
+ln -s ../../../lib "$T/dev/ts/app/node_modules/@0k/lib"
+cd "$T/dev/ts/lib" && consumers --check -C "$T/dev/ts/lib"' \
+    "--check succeeds when every consumer is linked"
+noerror
+
+## errors
+
+try 'mkdir -p "$T/dev/ts/empty" && cd "$T/dev/ts/empty" && consumers' \
+    "a library directory without package manifest is refused"
+is errlvl 2
+is err part "Error: no package name found in"
+is out "" RTRIM

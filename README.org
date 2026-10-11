@@ -269,6 +269,45 @@ when a stale pending file remains or the valid sender token has rotated.
 Completed receipts include the verified event permalink, Matrix
 ~origin_server_ts~, and an ISO UTC posting time.
 
+*** ~pkg consumers~ - List the projects that depend on this library
+
+Run from a library checkout, ~pkg consumers~ scans every project
+~ROOT/*/*~ of the development tree (default ~$HOME/dev~, or
+~$PKG_CONSUMERS_ROOT~, or ~--root~) and lists those whose manifest
+depends on the package defined here (~Cargo.toml~, ~package.json~ or
+~pyproject.toml~).  It is read-only.  It is what a release uses to know
+which consumers must receive a version bump commit, and whether each of
+them still builds against this checkout through its local,
+uncommitted override.
+
+#+begin_src sh
+$ cd ~/dev/ts/time-chart && pkg consumers
+/home/vaab/dev/ts/rrd-graph	npm	dependencies	^0.1.2	linked
+#+end_src
+
+One tab-separated record per dependency entry: consumer directory,
+ecosystem, dependency table, committed requirement, override state.
+
+| Override    | Meaning                                                             |
+|-------------+---------------------------------------------------------------------|
+| ~linked~    | the local override points at this checkout                          |
+| ~foreign~   | an override points at another directory                             |
+| ~none~      | no override: the consumer builds against the registry version       |
+| ~committed~ | (cargo) the ~.cargo/config.toml~ patch is tracked by git            |
+| ~manifest~  | the committed requirement itself is a path (~path:~, ~file:~, ~link:~) |
+| ~unknown~   | (python) no ~.venv~ to inspect                                      |
+
+Overrides inspected: npm ~node_modules/<name>~ symlink (~npm link~),
+cargo ~[patch.*]~ path in ~.cargo/config.toml~ (resolved from the
+parent of ~.cargo/~), python editable install recorded in
+~.venv/lib/python*/site-packages/*.dist-info/direct_url.json~.
+
+~--check~ exits 1 and names, on stderr, every consumer whose override is
+not ~linked~.  ~-0~ and ~--json~ emit the fields ~dir~, ~ecosystem~,
+~package~, ~field~, ~requirement~, ~override~.  Exit code 2 means a
+usage or environment error (no package manifest in the library, missing
+~jq~ or ~toml~).
+
 *** ~t~ - Run Tests
 
 Runs the test suite for the detected package type.

@@ -24,17 +24,20 @@ pkgcmd:all:applies() {
 
 ## ``pkg`` command -- check code and make package and validate them
 pkgcmd:pkg:all:run() {
-    if [ "$1" = announce ]; then
-        shift
-        local plugin_root announce_bin
-        plugin_root="$(readlink -f "$CONFIG_PATH/pkgcmd.d")" ||
-            die "announce: cannot resolve the 0k-pkg plugin directory."
-        announce_bin="${plugin_root%/etc/pkgcmd.d}/bin/pkg-announce"
-        [ -x "$announce_bin" ] ||
-            die "announce: helper not found at '$announce_bin'."
-        "$announce_bin" "$@"
-        return $?
-    fi
+    ## ``pkg announce`` / ``pkg consumers``: standalone helpers in bin/.
+    case "$1" in
+        announce|consumers)
+            local verb="$1" plugin_root helper_bin
+            shift
+            plugin_root="$(readlink -f "$CONFIG_PATH/pkgcmd.d")" ||
+                die "$verb: cannot resolve the 0k-pkg plugin directory."
+            helper_bin="${plugin_root%/etc/pkgcmd.d}/bin/pkg-$verb"
+            [ -x "$helper_bin" ] ||
+                die "$verb: helper not found at '$helper_bin'."
+            "$helper_bin" "$@"
+            return $?
+            ;;
+    esac
     pkg-common "$@"
 }
 
